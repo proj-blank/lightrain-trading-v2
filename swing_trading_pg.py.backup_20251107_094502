@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+# LightRain Swing Trading - PostgreSQL + AngelOne
+import os, sys
+sys.path.insert(0, '/Users/brosshack/project_blank/LightRain')
+sys.path.insert(0, '/Users/brosshack/project_blank/LightRain/LightRain')
+
+from datetime import datetime
+from scripts.signal_generator_swing import generate_signal_swing
+from scripts.signal_generator_v3 import get_enabled_indicators
+from scripts.risk_manager import calculate_atr, calculate_position_size, calculate_dynamic_stops, check_circuit_breaker, analyze_drop_reason, format_circuit_breaker_message, format_alert_message
+from scripts.telegram_bot import send_telegram_message
+from scripts.rs_rating import RelativeStrengthAnalyzer
+from scripts.portfolio_manager import get_stock_category
+from scripts.ai_news_analyzer import get_ai_recommendation
+from scripts.db_connection import get_active_positions, get_available_cash, is_position_on_hold, get_today_trades, get_portfolio_summary, get_trade_summary, update_position_price
+from scripts.data_loader import load_data
+from scripts.data_loader_angelone import get_current_prices_angelone
+from scripts.order_executor import get_order_executor
+import pandas as pd
+
+STRATEGY = "SWING"
+MAX_POSITIONS = 19
+MIN_SIGNAL_SCORE = 65
+MIN_RS_RATING = 65
+
+print("="*70)
+print("🌧️  LIGHTRAIN - SWING TRADING")
+print("="*70)
+print(f"📅 {datetime.now().strftime('%d %b %Y, %H:%M:%S')}")
+
+TRADING_ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
+LIVE_ORDERS = os.getenv("LIVE_ORDERS_ENABLED", "false").lower() == "true"
+print(f"Mode: {'🔴 LIVE' if LIVE_ORDERS else '📝 PAPER'}")
+
+if not TRADING_ENABLED:
+    send_telegram_message("⏸️ Trading PAUSED")
+    sys.exit(0)
+
+watchlist_df = pd.read_csv('/Users/brosshack/project_blank/LightRain/data/watchlist.csv')
+tickers = watchlist_df['Ticker'].tolist()
+stock_data = load_data(period='1y', interval='1d')
+
+positions = get_active_positions(strategy=STRATEGY)
+available_cash = get_available_cash(STRATEGY)
+rs_analyzer = RelativeStrengthAnalyzer()
+order_executor = get_order_executor(STRATEGY)
+
+signals_generated = []
+rs_filtered_count = 0
+
+for ticker, df in stock_data.items():
+    if df.empty or len(df) < 100: continue
+    rs_rating = rs_analyzer.calculate_rs_rating(ticker)
+    if rs_rating < MIN_RS_RATING:
+        rs_filtered_count += 1
+        continue
+    signal, score, details = generate_signal_swing(df, min_score=MIN_SIGNAL_SCORE)
+    if signal == 'BUY':
+        position_exists = any(p['ticker'] == ticker for p in positions)
+        if not position_exists and len(positions) < MAX_POSITIONS:
+            signals_generated.append({'ticker': ticker, 'score': score, 'rs_rating': rs_rating, 'price': float(df['Close'].iloc[-1]), 'category': get_stock_category(ticker)})
+
+# Sort by score and allocate capital by category (60/20/20)
+large_cap_sigs = [s for s in signals_generated if s['category'] == 'Large-cap'][:6]
+mid_cap_sigs = [s for s in signals_generated if s['category'] == 'Mid-cap'][:5]
+micro_cap_sigs = [s for s in signals_generated if s['category'] == 'Microcap'][:8]
+selected_signals = large_cap_sigs + mid_cap_sigs + micro_cap_sigs
+
+for sig in selected_signals:
+    ticker = sig['ticker']
+    current_price = sig['price']
+    category = sig['category']
+    df = stock_data[ticker]
+    atr = calculate_atr(df)
+    
+    # Category-based allocation
+    category_cash = {'Large-cap': available_cash * 0.60, 'Mid-cap': available_cash * 0.20, 'Microcap': available_cash * 0.20}
+    cat_cash = category_cash.get(category, available_cash * 0.10)
+    
+    shares, allocation = calculate_position_size(current_price, atr, cat_cash, 0.15)
+    stop_loss, take_profit = calculate_dynamic_stops(current_price, atr, strategy='swing')
+    
+    result = order_executor.execute_buy(ticker, shares, current_price, stop_loss, take_profit, category)
+    if result['success']:
+        positions.append({'ticker': ticker})
+        available_cash -= allocation
+
+if positions:
+    position_tickers = [p['ticker'] for p in positions]
+    current_prices = get_current_prices_angelone(position_tickers)
+    for pos in positions:
+        ticker = pos['ticker']
+        entry_price = float(pos['entry_price'])
+        quantity = int(pos['quantity'])
+        stop_loss = float(pos['stop_loss'])
+        take_profit = float(pos['take_profit'])
+        entry_date = pos.get('entry_date', datetime.now().strftime('%Y-%m-%d'))
+        current_price = current_prices.get(ticker)
+        if not current_price: continue
+        update_position_price(ticker, STRATEGY, current_price)
+        if is_position_on_hold(ticker, STRATEGY): continue
+        action, loss, analysis = check_circuit_breaker(ticker, entry_price, current_price, entry_date, alert_threshold=0.03, hard_stop=0.05)
+        if action == 'CIRCUIT_BREAKER':
+            result = order_executor.execute_sell(ticker, quantity, current_price, f"Circuit breaker {analysis['loss_pct']:.2f}%")
+            if result['success']:
+                send_telegram_message(format_circuit_breaker_message(ticker, analysis))
+        elif action == 'ALERT':
+            drop_analysis = analyze_drop_reason(ticker)
+            try:
+                ai_analysis = get_ai_recommendation(ticker, drop_analysis, entry_price, current_price, analysis['loss_pct'])
+            except:
+                ai_analysis = None
+            send_telegram_message(format_alert_message(ticker, analysis, drop_analysis, ai_analysis))
+        elif current_price <= stop_loss:
+            order_executor.execute_sell(ticker, quantity, current_price, "Stop loss")
+        elif current_price >= take_profit:
+            order_executor.execute_sell(ticker, quantity, current_price, "Take profit")
+
+portfolio_summary = get_portfolio_summary(STRATEGY)
+today_trades = get_today_trades(STRATEGY)
+print(f"Signals: {len(signals_generated)}, RS Filtered: {rs_filtered_count}, Trades: {len(today_trades)}, Positions: {portfolio_summary.get('total_positions', 0)}")
+send_telegram_message(f"{'🔴 LIVE' if LIVE_ORDERS else '📝 PAPER'} SWING REPORT\nSignals: {len(signals_generated)}\nTrades: {len(today_trades)}\nPositions: {portfolio_summary.get('total_positions', 0)}")

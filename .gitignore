@@ -1,0 +1,38 @@
+# Secrets and credentials - NEVER COMMIT
+.env
+*_credentials.json
+*_api_keys.txt
+*.pem
+*.key
+config.ini
+secrets.py
+angel_cred.txt
+
+# Runtime files
+logs/
+*.log
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.pytest_cache/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+.cache/
+
+# Data files (optional - add if you don't want position history in Git)
+# data/*.json
+# data/*.csv
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+Thumbs.db
+.directory

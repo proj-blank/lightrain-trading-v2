@@ -1,0 +1,501 @@
+# daily_trading.py
+"""
+Daily automated trading script with Telegram notifications (PostgreSQL + NSE Universe version).
+Run this once per day (before market open or after close).
+"""
+
+import os
+import sys
+import pandas as pd
+import yfinance as yf
+from datetime import datetime
+
+# Add LightRain path for db_connection
+sys.path.insert(0, '/home/ubuntu/trading')
+
+# Database imports
+from scripts.db_connection import (
+    get_active_positions, add_position, close_position, log_trade,
+    get_capital, update_capital, get_available_cash,
+    is_position_on_hold, add_circuit_breaker_hold, get_today_trades,
+    get_db_cursor
+)
+
+# Trading logic imports
+from scripts.signal_generator_daily import generate_signal_daily
+from scripts.signal_generator_v3 import get_enabled_indicators
+from scripts.risk_manager import (
+    calculate_position_metrics, check_circuit_breaker, analyze_drop_reason,
+    format_circuit_breaker_message, calculate_atr
+)
+from scripts.telegram_bot import (
+    send_daily_report, send_trade_alert, send_stop_loss_alert,
+    send_take_profit_alert, format_portfolio_summary,
+    format_trades_today, format_signals, send_telegram_message
+)
+from scripts.rs_rating import RelativeStrengthAnalyzer
+from scripts.percentage_based_allocation import calculate_percentage_allocation, select_positions_for_entry
+
+# Optional AI analyzer (if available)
+try:
+    from scripts.ai_analyzer import analyze_position_with_AI
+    AI_ANALYSIS_AVAILABLE = True
+except ImportError:
+    AI_ANALYSIS_AVAILABLE = False
+    def analyze_position_with_ai(*args, **kwargs):
+        return None
+
+# Configuration
+ACCOUNT_SIZE = 500000
+# NO MAX_POSITIONS - using percentage-based allocation (60/20/20 split)
+MAX_POSITION_PCT = 0.20
+MIN_COMBINED_SCORE = 50
+USE_ATR_SIZING = True
+MIN_RS_RATING = 60  # Minimum Relative Strength rating for daily trading (1-99 scale)
+MIN_SCORE = 60  # Minimum technical score to qualify for entry
+STRATEGY = 'DAILY'
+
+print("=" * 70)
+print("🤖 DAILY AUTOMATED TRADING (PostgreSQL + NSE Universe)")
+print("=" * 70)
+print(f"📅 {datetime.now().strftime('%d %b %Y, %H:%M:%S')}")
+print("=" * 70)
+
+# Check if trading is enabled
+TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() == "true"
+
+if not TRADING_ENABLED:
+    message = "⏸️ Trading is PAUSED\n\nTo resume, set TRADING_ENABLED=true in .env"
+    print(message)
+    send_telegram_message(message)
+    sys.exit(0)
+
+# Load stocks from screened_stocks table
+print("\n📥 Loading stocks from NSE universe...")
+stocks_to_screen = []
+stock_categories = {}  # Map ticker to category
+
+try:
+    with get_db_cursor() as cur:
+        cur.execute("""
+            SELECT ticker, category
+            FROM screened_stocks
+            WHERE last_updated = CURRENT_DATE
+            ORDER BY category, ticker
+        """)
+        results = cur.fetchall()
+
+        if not results:
+            error_msg = "❌ No stocks found in screened_stocks table for today. Run stocks_screening.py first."
+            print(error_msg)
+            send_telegram_message(error_msg)
+            sys.exit(1)
+
+        for row in results:
+            ticker = row['ticker']
+            category = row['category']
+            stocks_to_screen.append(ticker)
+            stock_categories[ticker] = category
+
+        print(f"✅ Loaded {len(stocks_to_screen)} stocks from database")
+
+        # Count by category
+        from collections import Counter
+        category_counts = Counter(stock_categories.values())
+        for cat, count in sorted(category_counts.items()):
+            print(f"   {cat}: {count}")
+
+except Exception as e:
+    error_msg = f"❌ Failed to load stocks from database: {e}"
+    print(error_msg)
+    send_telegram_message(error_msg)
+    sys.exit(1)
+
+# Download OHLCV data for all stocks
+print(f"\n📥 Downloading data for {len(stocks_to_screen)} stocks...")
+stock_data = {}
+download_errors = 0
+
+for i, ticker in enumerate(stocks_to_screen, 1):
+    if i % 50 == 0:
+        print(f"   Progress: {i}/{len(stocks_to_screen)}")
+
+    try:
+        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        if not df.empty and len(df) >= 60:
+            stock_data[ticker] = df
+    except Exception as e:
+        download_errors += 1
+
+print(f"✅ Downloaded {len(stock_data)} stocks ({download_errors} errors)")
+
+if not stock_data:
+    error_msg = "❌ No stock data downloaded. Check network or yfinance."
+    print(error_msg)
+    send_telegram_message(error_msg)
+    sys.exit(1)
+
+# Load portfolio from database
+print("📥 Loading portfolio from database...")
+positions = get_active_positions(STRATEGY)
+
+# Convert to DataFrame format for compatibility with existing code
+portfolio_data = []
+for pos in positions:
+    portfolio_data.append({
+        'Ticker': pos['ticker'],
+        'Status': pos['status'],
+        'EntryPrice': float(pos['entry_price']),
+        'EntryDate': pos['entry_date'].strftime('%Y-%m-%d') if hasattr(pos['entry_date'], 'strftime') else str(pos['entry_date']),
+        'Quantity': int(pos['quantity']),
+        'StopLoss': float(pos['stop_loss']),
+        'TakeProfit': float(pos['take_profit'])
+    })
+
+if portfolio_data:
+    portfolio = pd.DataFrame(portfolio_data)
+    print(f"✅ Portfolio loaded: {len(portfolio[portfolio['Status']=='HOLD'])} positions")
+else:
+    portfolio = pd.DataFrame(columns=["Ticker", "Status", "EntryPrice", "EntryDate", "Quantity", "StopLoss", "TakeProfit"])
+    print("⚠️ No positions in database")
+
+# Track today's activity
+signals_generated = []
+trades_today = []
+
+print(f"\n🎯 Analyzing {len(stock_data)} stocks...")
+
+# Show which indicators are enabled
+enabled = get_enabled_indicators()
+print(f"📊 Using indicators: {', '.join(enabled)}")
+print()
+
+# Initialize RS Analyzer
+rs_analyzer = RelativeStrengthAnalyzer()
+rs_filtered_count = 0
+
+# PHASE 1: Collect all BUY signals (don't execute positions yet)
+print("🔍 PHASE 1: Scanning for BUY signals...")
+candidates_by_category = {'large_caps': [], 'mid_caps': [], 'micro_caps': []}
+sell_signals = []  # Track SELL signals for existing positions
+
+for ticker, df in stock_data.items():
+    if df.empty or len(df) < 60:
+        continue
+
+    try:
+        # RS Rating Filter (Pre-filter before expensive indicator calculations)
+        rs_rating = rs_analyzer.calculate_rs_rating(ticker)
+        if rs_rating < MIN_RS_RATING:
+            rs_filtered_count += 1
+            continue  # Skip weak stocks
+
+        # Generate signal using v3 (configurable)
+        signal, score, details = generate_signal_daily(df, min_score=MIN_COMBINED_SCORE)
+
+        # Track signal
+        if signal != "HOLD":
+            signals_generated.append({
+                'ticker': ticker,
+                'action': signal,
+                'score': score,
+                'details': details,
+                'rs_rating': rs_rating
+            })
+            print(f"{ticker}: {signal} (Score: {score} | RS: {rs_rating})")
+
+        # Categorize BUY signals by market cap
+        if signal == "BUY":
+            # Skip if already holding
+            if not portfolio.empty and ticker in portfolio['Ticker'].values:
+                continue
+
+            # Get category from database lookup
+            category = stock_categories.get(ticker, 'Unknown')
+
+            # Map database category to allocation category
+            category_map = {
+                'Large-cap': 'large_caps',
+                'Mid-cap': 'mid_caps',
+                'Micro-cap': 'micro_caps'
+            }
+            allocation_category = category_map.get(category)
+
+            if allocation_category:
+                # Calculate ATR for risk-based sizing
+                atr = calculate_atr(df, period=14)
+                atr_pct = (atr / float(df['Close'].iloc[-1])) * 100 if atr > 0 else 2.0
+
+                candidates_by_category[allocation_category].append({
+                    'ticker': ticker,
+                    'score': score,
+                    'price': float(df['Close'].iloc[-1]),
+                    'atr_pct': atr_pct,
+                    'rs_rating': rs_rating,
+                    'df': df  # Store for later use
+                })
+
+        elif signal == "SELL":
+            # Track SELL signals for existing positions
+            if not portfolio.empty and ticker in portfolio['Ticker'].values:
+                sell_signals.append({
+                    'ticker': ticker,
+                    'score': score,
+                    'df': df
+                })
+
+    except Exception as e:
+        print(f"⚠️ Error processing {ticker}: {e}")
+        continue
+
+# Count candidates
+total_candidates = sum(len(v) for v in candidates_by_category.values())
+print(f"\n📊 BUY Signals Found: {total_candidates}")
+print(f"   Large-caps: {len(candidates_by_category['large_caps'])}")
+print(f"   Mid-caps: {len(candidates_by_category['mid_caps'])}")
+print(f"   Micro-caps: {len(candidates_by_category['micro_caps'])}")
+print(f"   Stocks filtered by RS < {MIN_RS_RATING}: {rs_filtered_count}")
+print(f"   SELL Signals: {len(sell_signals)}")
+
+# PHASE 2: Process SELL signals first (close positions)
+print("\n🔍 PHASE 2: Processing SELL signals...")
+
+for sell in sell_signals:
+    ticker = sell['ticker']
+    df = sell['df']
+
+    if ticker in portfolio['Ticker'].values:
+        pos = portfolio[portfolio['Ticker'] == ticker].iloc[0]
+        entry_price = float(pos['EntryPrice'])
+        current_price = float(df['Close'].iloc[-1])
+        qty = int(pos['Quantity'])
+        pnl = (current_price - entry_price) * qty
+
+        try:
+            close_position(ticker, STRATEGY, current_price, pnl)
+            update_capital(STRATEGY, pnl)
+
+            # Log trade
+            log_trade(
+                ticker=ticker,
+                strategy=STRATEGY,
+                signal='SELL',
+                price=current_price,
+                quantity=qty,
+                pnl=pnl,
+                notes=f"Exit signal (Score: {sell['score']})"
+            )
+
+            # Update local portfolio
+            portfolio.loc[portfolio['Ticker'] == ticker, 'Status'] = 'SOLD'
+
+            print(f"   🛑 SOLD {ticker} @ ₹{current_price:.2f} | P&L: ₹{pnl:,.0f}")
+
+            # Send Telegram alert
+            send_stop_loss_alert(ticker, entry_price, current_price, pnl, strategy=STRATEGY)
+
+        except Exception as e:
+            print(f"   ⚠️ Failed to close position {ticker}: {e}")
+
+# PHASE 3: Apply percentage-based allocation (NO FIXED POSITION COUNTS)
+print("\n🔍 PHASE 3: Applying percentage-based 60/20/20 allocation...")
+
+if total_candidates > 0:
+    # Calculate percentage-based allocation (variable position count!)
+    allocation_plan = calculate_percentage_allocation(
+        candidates_by_category,
+        total_capital=ACCOUNT_SIZE,
+        target_allocation={'large': 0.60, 'mid': 0.20, 'micro': 0.20},
+        min_position_size=20000,  # Min ₹20K per position
+        max_position_size=150000,  # Max ₹150K per position
+        min_score=MIN_SCORE,
+        min_rs_rating=MIN_RS_RATING
+    )
+
+    # Get selected positions (already filtered and scored)
+    selected_positions = select_positions_for_entry(allocation_plan)
+
+    print(f"\n🔍 PHASE 4: Executing {len(selected_positions)} selected positions...")
+
+    # Execute selected positions
+    for position in selected_positions:
+        ticker = position['ticker']
+        score = position['score']
+        price = position['price']
+        capital_allocated = position['capital_allocated']
+        df = position['df']
+
+        # Calculate quantity
+        qty = int(capital_allocated // price)
+
+        if qty == 0:
+            continue
+
+        # Calculate stop loss and take profit based on ATR
+        atr = calculate_atr(df, period=14)
+        stop_loss = price - (2 * atr) if atr > 0 else price * 0.98  # 2 ATR or 2%
+        take_profit = price + (3 * atr) if atr > 0 else price * 1.04  # 3 ATR or 4%
+
+        # Add position to database
+        try:
+            add_position(
+                ticker=ticker,
+                strategy=STRATEGY,
+                entry_price=price,
+                quantity=qty,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                category=stock_categories.get(ticker, 'Unknown'),
+                entry_date=datetime.now().strftime('%Y-%m-%d')
+            )
+
+            # Log trade
+            log_trade(
+                ticker=ticker,
+                strategy=STRATEGY,
+                signal='BUY',
+                price=price,
+                quantity=qty,
+                pnl=0,
+                notes=f"Signal score: {score:.0f} | RS: {position.get('rs_rating', 'N/A')}"
+            )
+
+            # Add to local portfolio
+            new_row = pd.DataFrame([{
+                'Ticker': ticker,
+                'Status': 'HOLD',
+                'EntryPrice': price,
+                'EntryDate': datetime.now().strftime('%Y-%m-%d'),
+                'Quantity': qty,
+                'StopLoss': stop_loss,
+                'TakeProfit': take_profit
+            }])
+            portfolio = pd.concat([portfolio, new_row], ignore_index=True)
+
+            print(f"   ✅ BOUGHT {ticker} @ ₹{price:.2f} | Qty: {qty} | {stock_categories.get(ticker, 'Unknown')}")
+
+            # Send Telegram alert
+            details_str = f"Score: {score:.0f} | RS: {position.get('rs_rating', 'N/A')}"
+            send_trade_alert(ticker, 'BUY', price, qty, details_str, strategy=STRATEGY)
+
+        except Exception as e:
+            print(f"   ⚠️ Failed to add position {ticker}: {e}")
+
+else:
+    print(f"   ℹ️ No qualified candidates found for entry")
+
+print(f"\n✅ Portfolio processing complete")
+
+# Update positions tracker (for dynamic watchlist)
+from scripts.position_tracker import update_positions_file
+num_positions = len(portfolio[portfolio['Status'] == 'HOLD'])
+print(f"✅ Active positions: {num_positions}")
+
+# Update performance metrics
+from scripts.performance_tracker import update_results
+update_results(portfolio, stock_data)
+
+# Circuit Breaker Monitoring (4% alert / 5% hard stop)
+print("\n🛡️ Checking circuit breakers...")
+
+for _, row in portfolio[portfolio['Status'] == 'HOLD'].iterrows():
+    ticker = row['Ticker']
+    entry_price = float(row['EntryPrice'])
+    entry_date = row.get('EntryDate', datetime.now().strftime("%Y-%m-%d"))
+    qty = int(row['Quantity'])
+
+    # Skip if on hold (check database)
+    if is_position_on_hold(ticker, STRATEGY):
+        print(f"  ⏸️ {ticker}: On hold (suppressed)")
+        continue
+
+    if ticker in stock_data and not stock_data[ticker].empty:
+        current_price = float(stock_data[ticker]['Close'].iloc[-1])
+
+        # Check circuit breaker (4% alert, 5% hard stop)
+        action, loss, analysis = check_circuit_breaker(
+            ticker, entry_price, current_price, entry_date,
+            alert_threshold=0.04,  # 4% alert
+            hard_stop=0.05  # 5% hard stop
+        )
+
+        if action == 'CIRCUIT_BREAKER':
+            # Hard stop - immediate exit
+            print(f"  🔴 CIRCUIT BREAKER: {ticker} | Loss: {analysis['loss_pct']:.2f}%")
+
+            # Format and send message
+            msg = format_circuit_breaker_message(ticker, analysis)
+            send_telegram_message(msg)
+
+            # Execute exit in database
+            pnl = (current_price - entry_price) * qty
+            try:
+                close_position(ticker, STRATEGY, current_price, pnl)
+                update_capital(STRATEGY, pnl)
+
+                log_trade(
+                    ticker=ticker,
+                    strategy=STRATEGY,
+                    signal='SELL',
+                    price=current_price,
+                    quantity=qty,
+                    pnl=pnl,
+                    notes=f"Circuit breaker at {analysis['loss_pct']:.2f}%"
+                )
+            except Exception as e:
+                print(f"  ❌ Failed to exit position: {e}")
+
+            # Update local portfolio
+            portfolio.loc[portfolio['Ticker'] == ticker, 'Status'] = 'SOLD'
+
+            print(f"  ✅ Position exited: {ticker}")
+
+        elif action == 'ALERT':
+            # 4% alert - investigate
+            print(f"  ⚠️ ALERT: {ticker} | Loss: {analysis['loss_pct']:.2f}%")
+
+            # Analyze drop reason
+            drop_analysis = analyze_drop_reason(ticker)
+
+            # Get AI analysis
+            ai_analysis = None
+            try:
+                ai_analysis = analyze_position_with_ai(
+                    ticker, entry_price, current_price, entry_date
+                )
+            except Exception as e:
+                print(f"    ⚠️ AI analysis failed: {e}")
+
+            # Format alert message
+            from scripts.risk_manager import format_alert_message
+            msg = format_alert_message(ticker, analysis, drop_analysis, ai_analysis)
+            send_telegram_message(msg)
+
+print("✅ Circuit breaker check complete\n")
+
+# Calculate portfolio metrics
+metrics = calculate_position_metrics(portfolio, stock_data)
+
+# Get today's trades from database
+today_trades_list = get_today_trades(STRATEGY)
+today_trades_df = pd.DataFrame(today_trades_list) if today_trades_list else pd.DataFrame()
+
+# Format and send daily report
+portfolio_summary = format_portfolio_summary(metrics)
+trades_summary = format_trades_today(today_trades_df)
+signals_summary = format_signals(signals_generated)
+
+send_daily_report(portfolio_summary, trades_summary, signals_summary, strategy=STRATEGY)
+
+# Print summary
+print(f"\n{'='*70}")
+print("📊 DAILY SUMMARY")
+print(f"{'='*70}")
+print(f"Signals Generated: {len(signals_generated)}")
+print(f"Stocks Filtered by RS < {MIN_RS_RATING}: {rs_filtered_count}")
+print(f"Trades Executed: {len(today_trades_df)}")
+print(f"Active Positions: {metrics['total_positions']}")
+print(f"Portfolio P&L: ₹{metrics['total_unrealized_pnl']:,.2f}")
+print(f"{'='*70}")
+print("✅ Daily trading complete!")
+print(f"{'='*70}\n")

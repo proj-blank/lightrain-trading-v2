@@ -1,0 +1,333 @@
+"""
+Database connection layer for LightRain trading system
+Handles PostgreSQL connections and provides helper functions
+"""
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from contextlib import contextmanager
+import os
+from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv("/home/ubuntu/trading/.env")
+from typing import List, Dict, Optional, Tuple
+
+# Database configuration
+DB_CONFIG = {
+    'dbname': 'lightrain',
+    'user': os.getenv('DB_USER', 'brosshack'),
+    'password': os.getenv('DB_PASSWORD', ''),
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'port': os.getenv('DB_PORT', '5432')
+}
+
+@contextmanager
+def get_db_connection():
+    """Context manager for database connections"""
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        yield conn
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+@contextmanager
+def get_db_cursor(cursor_factory=RealDictCursor):
+    """Context manager for database cursors with dict results"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor(cursor_factory=cursor_factory)
+        try:
+            yield cursor
+        finally:
+            cursor.close()
+
+# ==================== POSITION MANAGEMENT ====================
+
+def get_active_positions(strategy: str = None) -> List[Dict]:
+    """Get all active positions, optionally filtered by strategy"""
+    with get_db_cursor() as cur:
+        if strategy:
+            cur.execute("""
+                SELECT * FROM positions
+                WHERE status = 'HOLD' AND strategy = %s
+                ORDER BY entry_date DESC
+            """, (strategy,))
+        else:
+            cur.execute("""
+                SELECT * FROM positions
+                WHERE status = 'HOLD'
+                ORDER BY entry_date DESC
+            """)
+        return cur.fetchall()
+
+def add_position(ticker: str, strategy: str, entry_price: float, quantity: int,
+                stop_loss: float, take_profit: float, category: str,
+                entry_date: str = None) -> int:
+    """Add new position to portfolio"""
+    if entry_date is None:
+        entry_date = datetime.now().strftime('%Y-%m-%d')
+
+    with get_db_cursor() as cur:
+        cur.execute("""
+            INSERT INTO positions
+            (ticker, strategy, status, entry_price, quantity, stop_loss, take_profit, category, entry_date)
+            VALUES (%s, %s, 'HOLD', %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (ticker, strategy, float(entry_price), int(quantity), float(stop_loss), float(take_profit), category, entry_date))
+        return cur.fetchone()['id']
+
+def debit_capital(strategy: str, amount: float):
+    """Debit capital when entering a position"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            UPDATE capital_tracker
+            SET current_trading_capital = current_trading_capital - %s,
+                last_updated = CURRENT_TIMESTAMP
+            WHERE strategy = %s
+        """, (amount, strategy))
+
+def credit_capital(strategy: str, amount: float):
+    """Credit capital back when exiting a position"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            UPDATE capital_tracker
+            SET current_trading_capital = current_trading_capital + %s,
+                last_updated = CURRENT_TIMESTAMP
+            WHERE strategy = %s
+        """, (amount, strategy))
+
+def update_position_price(ticker: str, strategy: str, current_price: float):
+    """Update current price and unrealized P&L for a position"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            UPDATE positions
+            SET current_price = %s,
+                unrealized_pnl = (current_price - entry_price) * quantity,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ticker = %s AND strategy = %s AND status = 'HOLD'
+        """, (current_price, ticker, strategy))
+
+def close_position(ticker: str, strategy: str, exit_price: float, realized_pnl: float):
+    """Close a position and mark as CLOSED"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            UPDATE positions
+            SET status = 'CLOSED',
+                current_price = %s,
+                exit_date = CURRENT_DATE,
+                realized_pnl = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ticker = %s AND strategy = %s AND status = 'HOLD'
+        """, (exit_price, realized_pnl, ticker, strategy))
+
+def get_position(ticker: str, strategy: str) -> Optional[Dict]:
+    """Get specific position details"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            SELECT * FROM positions
+            WHERE ticker = %s AND strategy = %s AND status = 'HOLD'
+        """, (ticker, strategy))
+        return cur.fetchone()
+
+# ==================== TRADE LOGGING ====================
+
+def log_trade(ticker: str, strategy: str, signal: str, price: float,
+              quantity: int, pnl: float = None, notes: str = "",
+              category: str = None):
+    """Log a trade to the database"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            INSERT INTO trades
+            (ticker, strategy, signal, price, quantity, pnl, notes, category)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (ticker, strategy, signal, price, quantity, pnl, notes, category))
+        return cur.fetchone()['id']
+
+def get_trades(strategy: str = None, start_date: str = None,
+               end_date: str = None) -> List[Dict]:
+    """Get trade history with optional filters"""
+    with get_db_cursor() as cur:
+        query = "SELECT * FROM trades WHERE 1=1"
+        params = []
+
+        if strategy:
+            query += " AND strategy = %s"
+            params.append(strategy)
+        if start_date:
+            query += " AND trade_date >= %s"
+            params.append(start_date)
+        if end_date:
+            query += " AND trade_date <= %s"
+            params.append(end_date)
+
+        query += " ORDER BY trade_date DESC"
+        cur.execute(query, params)
+        return cur.fetchall()
+
+def get_today_trades(strategy: str = None) -> List[Dict]:
+    """Get today's trades"""
+    today = datetime.now().strftime('%Y-%m-%d')
+    return get_trades(strategy=strategy, start_date=today, end_date=today)
+
+# ==================== CAPITAL MANAGEMENT ====================
+
+def get_capital(strategy: str) -> Dict:
+    """Get capital tracker for a strategy"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            SELECT * FROM capital_tracker WHERE strategy = %s
+        """, (strategy,))
+        return cur.fetchone()
+
+def update_capital(strategy: str, pnl: float):
+    """Update capital after trade (profits locked, losses deducted)"""
+    with get_db_cursor() as cur:
+        if pnl > 0:
+            # Lock profits
+            cur.execute("""
+                UPDATE capital_tracker
+                SET total_profits_locked = total_profits_locked + %s,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE strategy = %s
+            """, (pnl, strategy))
+        else:
+            # Deduct losses from trading capital
+            cur.execute("""
+                UPDATE capital_tracker
+                SET current_trading_capital = current_trading_capital + %s,
+                    total_losses = total_losses + %s,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE strategy = %s
+            """, (pnl, abs(pnl), strategy))
+
+def get_available_cash(strategy: str) -> float:
+    """Get available cash for trading"""
+    capital = get_capital(strategy)
+    return float(capital['current_trading_capital']) if capital else 0
+
+# ==================== CIRCUIT BREAKER ====================
+
+def add_circuit_breaker_hold(ticker: str, strategy: str, user_action: str,
+                             loss_pct: float, hold_until: str = None,
+                             notes: str = ""):
+    """Record user's circuit breaker decision"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            INSERT INTO circuit_breaker_holds
+            (ticker, strategy, user_action, loss_pct, hold_until, notes)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (ticker, strategy, user_action, loss_pct, hold_until, notes))
+        return cur.fetchone()['id']
+
+def is_position_on_hold(ticker: str, strategy: str) -> bool:
+    """Check if position is on circuit breaker hold"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            SELECT id FROM circuit_breaker_holds
+            WHERE ticker = %s AND strategy = %s
+              AND (hold_until IS NULL OR hold_until > CURRENT_TIMESTAMP)
+            ORDER BY alert_date DESC
+            LIMIT 1
+        """, (ticker, strategy))
+        return cur.fetchone() is not None
+
+# ==================== PERFORMANCE METRICS ====================
+
+def save_daily_metrics(strategy: str, metrics: Dict):
+    """Save daily performance snapshot"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            INSERT INTO performance_metrics
+            (metric_date, strategy, total_positions, total_capital_deployed,
+             unrealized_pnl, realized_pnl, win_rate, avg_win, avg_loss,
+             sharpe_ratio, max_drawdown)
+            VALUES (CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (metric_date, strategy) DO UPDATE SET
+                total_positions = EXCLUDED.total_positions,
+                total_capital_deployed = EXCLUDED.total_capital_deployed,
+                unrealized_pnl = EXCLUDED.unrealized_pnl,
+                realized_pnl = EXCLUDED.realized_pnl,
+                win_rate = EXCLUDED.win_rate,
+                avg_win = EXCLUDED.avg_win,
+                avg_loss = EXCLUDED.avg_loss,
+                sharpe_ratio = EXCLUDED.sharpe_ratio,
+                max_drawdown = EXCLUDED.max_drawdown
+        """, (strategy, metrics.get('total_positions', 0),
+              metrics.get('total_capital_deployed', 0),
+              metrics.get('unrealized_pnl', 0),
+              metrics.get('realized_pnl', 0),
+              metrics.get('win_rate', 0),
+              metrics.get('avg_win', 0),
+              metrics.get('avg_loss', 0),
+              metrics.get('sharpe_ratio', 0),
+              metrics.get('max_drawdown', 0)))
+
+# ==================== RS RATING CACHE ====================
+
+def get_rs_rating_cached(ticker: str) -> Optional[int]:
+    """Get cached RS rating if available and fresh (<24h)"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            SELECT rs_rating FROM rs_cache
+            WHERE ticker = %s
+              AND last_updated > CURRENT_TIMESTAMP - INTERVAL '24 hours'
+        """, (ticker,))
+        result = cur.fetchone()
+        return result['rs_rating'] if result else None
+
+def update_rs_cache(ticker: str, rs_rating: int, returns: Dict):
+    """Update RS rating cache"""
+    with get_db_cursor() as cur:
+        cur.execute("""
+            INSERT INTO rs_cache
+            (ticker, rs_rating, weighted_return, return_3m, return_6m, return_9m, return_12m)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (ticker) DO UPDATE SET
+                rs_rating = EXCLUDED.rs_rating,
+                weighted_return = EXCLUDED.weighted_return,
+                return_3m = EXCLUDED.return_3m,
+                return_6m = EXCLUDED.return_6m,
+                return_9m = EXCLUDED.return_9m,
+                return_12m = EXCLUDED.return_12m,
+                last_updated = CURRENT_TIMESTAMP
+        """, (ticker, rs_rating, returns.get('weighted', 0),
+              returns.get('3m', 0), returns.get('6m', 0),
+              returns.get('9m', 0), returns.get('12m', 0)))
+
+# ==================== ANALYTICS VIEWS ====================
+
+def get_portfolio_summary(strategy: str = None) -> Dict:
+    """Get portfolio summary using optimized views"""
+    with get_db_cursor() as cur:
+        if strategy:
+            cur.execute("""
+                SELECT COUNT(*) as total_positions,
+                       SUM(unrealized_pnl) as total_unrealized_pnl,
+                       AVG(pnl_pct) as avg_pnl_pct
+                FROM v_active_positions
+                WHERE strategy = %s
+            """, (strategy,))
+        else:
+            cur.execute("""
+                SELECT COUNT(*) as total_positions,
+                       SUM(unrealized_pnl) as total_unrealized_pnl,
+                       AVG(pnl_pct) as avg_pnl_pct
+                FROM v_active_positions
+            """)
+        return cur.fetchone()
+
+def get_trade_summary(strategy: str = None) -> Dict:
+    """Get trade summary statistics"""
+    with get_db_cursor() as cur:
+        if strategy:
+            cur.execute("""
+                SELECT * FROM v_trade_summary WHERE strategy = %s
+            """, (strategy,))
+        else:
+            cur.execute("SELECT * FROM v_trade_summary")
+        result = cur.fetchone()
+        return result if result else {}

@@ -1,0 +1,46 @@
+# LightRain Trading System - Cron Schedule
+# System timezone: IST, Cron interprets as UTC (IST = UTC + 5:30)
+
+# ============================================
+# POSITION MONITORS (Every 5 minutes during market hours)
+# Market hours: 9:00 AM - 3:30 PM IST = 3:30 AM - 10:00 AM UTC
+# ============================================
+*/5 3-10 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_swing_pg.py >> logs/monitor_swing.log 2>&1
+*/5 3-10 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_positions.py >> logs/monitor_positions.log 2>&1
+*/5 3-10 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_daily.py >> logs/monitor_daily.log 2>&1
+
+# ============================================
+# MORNING ROUTINES (Pre-market)
+# 8:30 AM IST = 3:00 AM UTC
+# ============================================
+0 3 * * * cd /home/ubuntu/trading && bash run_market_check.sh >> logs/market_check.log 2>&1
+0 3 * * 1-5 cd /home/ubuntu/trading && bash run_stocks_screening.sh >> logs/stocks_screening_cron.log 2>&1
+
+# ============================================
+# TRADING EXECUTION (Market open)
+# 9:00 AM IST = 3:30 AM UTC
+# ============================================
+30 3 * * 1-5 cd /home/ubuntu/trading && bash run_daily_trading.sh >> logs/daily_trading_cron.log 2>&1
+30 3 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 daily_screening.py >> logs/daily_screening_cron.log 2>&1
+
+# ============================================
+# SWING TRADING (After market stabilizes)
+# 9:25 AM IST = 3:55 AM UTC
+# ============================================
+55 3 * * 1-5 cd /home/ubuntu/trading && bash run_swing_trading.sh >> logs/swing_trading_cron.log 2>&1
+
+# ============================================
+# END OF DAY PROCESSING
+# 3:30 PM IST = 10:00 AM UTC (Market close)
+# 4:00 PM IST = 10:30 AM UTC (Final report)
+# ============================================
+0 10 * * 1-5 cd /home/ubuntu/trading && bash run_eod_summary.sh >> logs/eod_summary.log 2>&1
+30 10 * * 1-5 cd /home/ubuntu/trading && bash run_eod_report.sh >> logs/eod_report.log 2>&1
+
+# ============================================
+# NOTES
+# ============================================
+# - Weekday only: 1-5 (Monday-Friday)
+# - All logs redirect to logs/ directory
+# - Monitor scripts run during market hours only
+# - EOD scripts ensure clean close and reporting
