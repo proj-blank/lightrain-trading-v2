@@ -445,8 +445,28 @@ def handle_gc():
         result += f"  {regime_emoji} {regime} (Score: {score:.1f})\n"
         result += f"  {entry_emoji} New Entries: {'ALLOWED' if allow_entries else 'BLOCKED'}\n\n"
 
+        # Overnight US/Asia indicators
+        result += "<b>Overnight Markets:</b>\n"
+        indicators = regime_data.get('indicators', {})
+        sp500 = indicators.get('sp500', {})
+        nasdaq = indicators.get('nasdaq', {})
+        vix = indicators.get('vix', {})
+
+        sp500_chg = sp500.get('change_pct', 0)
+        nasdaq_chg = nasdaq.get('change_pct', 0)
+        vix_val = vix.get('value', 0)
+        vix_level = vix.get('level', 'NORMAL')
+
+        sp500_emoji = "🟢" if sp500_chg >= 0 else "🔴"
+        nasdaq_emoji = "🟢" if nasdaq_chg >= 0 else "🔴"
+        vix_emoji = "🟢" if vix_val < 20 else "🟡" if vix_val < 30 else "🔴"
+
+        result += f"  {sp500_emoji} S&P 500: {sp500_chg:+.2f}%\n"
+        result += f"  {nasdaq_emoji} Nasdaq: {nasdaq_chg:+.2f}%\n"
+        result += f"  {vix_emoji} US VIX: {vix_val:.1f} ({vix_level})\n\n"
+
         # Get live India VIX and all 3 indices
-        result += "<b>Current Market (Live):</b>\n"
+        result += "<b>Current Indian Market (Live):</b>\n"
 
         green_count = 0
         total_indices = 0
