@@ -70,6 +70,33 @@ if not TRADING_ENABLED:
     send_telegram_message(message)
     sys.exit(0)
 
+# Check global market regime
+import json
+
+regime_file = '/home/ubuntu/trading/data/market_regime.json'
+if os.path.exists(regime_file):
+    with open(regime_file, 'r') as f:
+        regime = json.load(f)
+
+    if not regime.get('allow_new_entries', True):
+        print(f"🚫 Global regime: {regime.get('regime', 'UNKNOWN')}")
+        print(f"   Score: {regime.get('score', 0)}")
+        print(f"   Allow entries: False")
+        print("   Skipping DAILY trading due to BEAR market")
+
+        send_telegram_message(
+            f"🚫 DAILY Trading Blocked\n\n"
+            f"Market Regime: {regime.get('regime', 'UNKNOWN')}\n"
+            f"Score: {regime.get('score', 0)}\n"
+            f"Reason: Global market check says RISK OFF\n\n"
+            f"No new positions entered today."
+        )
+        sys.exit(0)
+    else:
+        print(f"✅ Global regime: {regime.get('regime', 'UNKNOWN')} (score: {regime.get('score', 0)})")
+        print(f"   Allow entries: True")
+        print(f"   Position multiplier: {regime.get('position_sizing_multiplier', 1.0)*100}%")
+
 # Load stocks from screened_stocks table
 print("\n📥 Loading stocks from NSE universe...")
 stocks_to_screen = []
@@ -360,9 +387,10 @@ if total_candidates > 0:
         try:
             from scripts.ai_validator import validate_position, get_verdict_emoji
 
+            # Ensure all numeric fields are float (fix: avoid passing ticker string as price)
             ai_result = validate_position(
                 ticker=ticker,
-                entry_price=price,
+                entry_price=float(price),  # Explicit float conversion
                 technical_score=score,
                 rs_rating=position.get('rs_rating', 50),
                 indicators_fired=position.get('indicators_fired', []),
