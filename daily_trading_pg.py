@@ -389,9 +389,16 @@ if total_candidates > 0:
     for position in selected_positions:
         ticker = position['ticker']
         score = position['score']
-        price = position['price']
+        price = position.get('price')
         capital_allocated = position['capital_allocated']
         df = position['df']
+
+        # Safety check: Ensure price is valid
+        if not price or not isinstance(price, (int, float)):
+            print(f"   ⚠️ SKIPPING {ticker}: Invalid price data (got {type(price).__name__}: {price})")
+            continue
+
+        price = float(price)  # Ensure it's float
 
         # Calculate quantity
         qty = int(capital_allocated // price)
