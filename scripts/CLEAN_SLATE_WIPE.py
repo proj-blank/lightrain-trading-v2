@@ -44,6 +44,7 @@ def confirm_wipe():
 def wipe_all_data():
     """Wipe all positions and trading data"""
     conn = psycopg2.connect(**DB_CONFIG)
+    conn.autocommit = False  # Explicit transaction control
     cur = conn.cursor()
 
     try:
@@ -75,26 +76,30 @@ def wipe_all_data():
         """)
 
         print(f"\n💰 Deployed Capital (will be wiped):")
-        for row in cur.fetchall():
-            strategy, deployed = row
-            print(f"   {strategy}: ₹{deployed:,.0f}")
+        deployed_rows = cur.fetchall()
+        if deployed_rows:
+            for row in deployed_rows:
+                strategy, deployed = row
+                print(f"   {strategy}: ₹{deployed:,.0f}")
+        else:
+            print(f"   No deployed capital (already clean)")
 
         print(f"\n🗑️  Deleting all data...")
 
         # Delete all positions (HOLD and CLOSED)
         cur.execute("DELETE FROM positions")
         deleted_positions = cur.rowcount
-        print(f"   ✓ Deleted {deleted_positions} positions")
+        print(f"   ✓ DELETE FROM positions: {deleted_positions} rows")
 
         # Delete all trade history
         cur.execute("DELETE FROM trades")
         deleted_trades = cur.rowcount
-        print(f"   ✓ Deleted {deleted_trades} trade records")
+        print(f"   ✓ DELETE FROM trades: {deleted_trades} rows")
 
         # Delete circuit breaker holds
         cur.execute("DELETE FROM circuit_breaker_holds")
         deleted_cb = cur.rowcount
-        print(f"   ✓ Deleted {deleted_cb} circuit breaker holds")
+        print(f"   ✓ DELETE FROM circuit_breaker_holds: {deleted_cb} rows")
 
         # Reset capital table (if exists)
         try:
@@ -108,15 +113,36 @@ def wipe_all_data():
         except:
             print(f"   ⚠️ No capital table to reset (ok)")
 
-        # Commit the wipe
+        # Explicit commit
+        print(f"\n💾 Committing transaction...")
         conn.commit()
+        print(f"   ✓ COMMIT successful")
 
-        print(f"\n✅ CLEAN SLATE COMPLETE!")
-        print(f"\n📈 Ready for Monday:")
-        print(f"   DAILY: ₹5,00,000 available")
-        print(f"   SWING: ₹5,00,000 available")
-        print(f"   TOTAL: ₹10,00,000")
-        print(f"\n🎯 System will start fresh on Monday morning.")
+        # Verify deletion worked
+        print(f"\n🔍 Verifying deletion...")
+        cur.execute("SELECT COUNT(*) FROM positions")
+        pos_verify = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM trades")
+        trades_verify = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM circuit_breaker_holds")
+        cb_verify = cur.fetchone()[0]
+
+        print(f"   positions: {pos_verify}")
+        print(f"   trades: {trades_verify}")
+        print(f"   circuit_breaker_holds: {cb_verify}")
+
+        if pos_verify == 0 and trades_verify == 0:
+            print(f"\n✅ CLEAN SLATE COMPLETE!")
+            print(f"\n📈 Ready for Monday:")
+            print(f"   DAILY: ₹5,00,000 available")
+            print(f"   SWING: ₹5,00,000 available")
+            print(f"   TOTAL: ₹10,00,000")
+            print(f"\n🎯 System will start fresh on Monday morning.")
+        else:
+            print(f"\n⚠️ WARNING: Some data still remains after deletion!")
+            print(f"   This should not happen. Manual cleanup may be required.")
 
     except Exception as e:
         conn.rollback()
