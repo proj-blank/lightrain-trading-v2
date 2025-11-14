@@ -36,3 +36,4 @@ __pycache__/
 # OS files
 Thumbs.db
 .directory
+data/market_regime.json
