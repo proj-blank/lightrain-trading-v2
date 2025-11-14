@@ -258,6 +258,38 @@ cat ~/trading/.env | grep TELEGRAM_BOT_TOKEN
 nano ~/trading/.env
 ```
 
+### Live Market Indices Not Showing
+**Symptoms**:
+- `/pnl` command shows "Market data temporarily unavailable"
+- Happens daily after bot has been running >24 hours
+
+**Root Cause**:
+- AngelOne API sessions expire after 24 hours
+- Bot was caching expired session and not refreshing
+
+**Solution** (Fixed as of Nov 14, 2025):
+The telegram bot now auto-refreshes AngelOne sessions:
+- Tracks session age
+- Auto-refreshes when >23 hours old
+- Retries API calls with fresh session on failure
+
+**Verification**:
+```bash
+# Check bot logs for session refresh messages
+tail -50 ~/trading/logs/telegram_bot.log | grep -i "angel"
+
+# Should see:
+# "Creating new Angel One session..."
+# "Angel One session created successfully"
+```
+
+**Manual Restart** (if needed):
+```bash
+# Restart bot to force new session
+pkill -f telegram_bot_listener.py
+cd ~/trading && nohup python3 telegram_bot_listener.py > logs/telegram_bot.log 2>&1 &
+```
+
 ---
 
 ## Position Management Issues
