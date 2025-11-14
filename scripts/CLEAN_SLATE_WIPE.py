@@ -101,17 +101,20 @@ def wipe_all_data():
         deleted_cb = cur.rowcount
         print(f"   ✓ DELETE FROM circuit_breaker_holds: {deleted_cb} rows")
 
-        # Reset capital table (if exists)
+        # Reset capital_tracker table to fresh ₹5L each
         try:
             cur.execute("""
-                UPDATE capital
-                SET current_trading_capital = initial_capital,
-                    total_realized_pnl = 0
+                UPDATE capital_tracker
+                SET current_trading_capital = 500000,
+                    total_profits_locked = 0,
+                    total_losses = 0,
+                    last_updated = CURRENT_TIMESTAMP
                 WHERE strategy IN ('DAILY', 'SWING')
             """)
-            print(f"   ✓ Reset capital table")
-        except:
-            print(f"   ⚠️ No capital table to reset (ok)")
+            updated_rows = cur.rowcount
+            print(f"   ✓ Reset capital_tracker: {updated_rows} strategies reset to ₹5,00,000 each")
+        except Exception as e:
+            print(f"   ⚠️ Could not reset capital_tracker: {e}")
 
         # Explicit commit
         print(f"\n💾 Committing transaction...")
