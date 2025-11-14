@@ -46,22 +46,50 @@ ANGEL_CLIENT_CODE = os.getenv('ANGELONE_CLIENT_ID')
 ANGEL_PASSWORD = os.getenv('ANGELONE_PASSWORD')
 ANGEL_TOTP_SECRET = os.getenv('ANGELONE_TOTP_SECRET')
 
-# Global Angel One session (lazy initialization)
+# Global Angel One session (lazy initialization with auto-refresh)
 _angel_session = None
+_angel_session_time = None
 
-def get_angel_session():
-    """Get or create Angel One session"""
-    global _angel_session
-    if _angel_session is None and ANGELONE_AVAILABLE:
+def get_angel_session(force_refresh=False):
+    """
+    Get or create Angel One session with auto-refresh on expiry
+
+    Args:
+        force_refresh: Force create new session even if one exists
+
+    Returns:
+        SmartConnect session or None
+    """
+    global _angel_session, _angel_session_time
+
+    # Check if session is expired (>23 hours old)
+    session_expired = False
+    if _angel_session_time:
+        age_seconds = time.time() - _angel_session_time
+        if age_seconds > 82800:  # 23 hours (give 1 hour buffer before 24hr expiry)
+            session_expired = True
+            print(f"Angel session expired ({age_seconds/3600:.1f} hours old), refreshing...")
+
+    # Create new session if needed
+    if (force_refresh or session_expired or _angel_session is None) and ANGELONE_AVAILABLE:
         try:
+            print("Creating new Angel One session...")
             smart_api = SmartConnect(api_key=ANGEL_API_KEY)
             totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
             data = smart_api.generateSession(ANGEL_CLIENT_CODE, ANGEL_PASSWORD, totp)
             if data['status']:
                 _angel_session = smart_api
+                _angel_session_time = time.time()
+                print("Angel One session created successfully")
+            else:
+                print(f"Angel One session failed: {data}")
+                _angel_session = None
+                _angel_session_time = None
         except Exception as e:
             print(f"Angel One login failed: {e}")
             _angel_session = None
+            _angel_session_time = None
+
     return _angel_session
 
 def get_index_change_angelone(token, symbol_name):
@@ -75,28 +103,36 @@ def get_index_change_angelone(token, symbol_name):
     Returns:
         float: Percentage change, or None if failed
     """
-    try:
-        session = get_angel_session()
-        if not session:
-            return None
+    # Try with existing session first
+    for attempt in [False, True]:  # False = use existing, True = force refresh
+        try:
+            session = get_angel_session(force_refresh=attempt)
+            if not session:
+                continue
 
-        # Get LTP data
-        ltp_data = session.ltpData("NSE", symbol_name, token)
-        if not ltp_data or ltp_data.get('status') != True:
-            return None
+            # Get LTP data
+            ltp_data = session.ltpData("NSE", symbol_name, token)
+            if not ltp_data or ltp_data.get('status') != True:
+                if attempt == False:  # First attempt failed, try refresh
+                    continue
+                return None
 
-        data = ltp_data.get('data', {})
-        ltp = float(data.get('ltp', 0))
-        open_price = float(data.get('open', 0))
+            data = ltp_data.get('data', {})
+            ltp = float(data.get('ltp', 0))
+            open_price = float(data.get('open', 0))
 
-        if open_price == 0:
-            return None
+            if open_price == 0:
+                return None
 
-        change_pct = ((ltp - open_price) / open_price) * 100
-        return change_pct
-    except Exception as e:
-        print(f"Failed to fetch {symbol_name}: {e}")
-        return None
+            change_pct = ((ltp - open_price) / open_price) * 100
+            return change_pct
+        except Exception as e:
+            if attempt == True:  # Second attempt also failed
+                print(f"Failed to fetch {symbol_name} after retry: {e}")
+                return None
+            # First attempt failed, will retry with fresh session
+
+    return None
 
 def send_message(text):
     requests.post(f'{BASE_URL}/sendMessage', json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'HTML'})
