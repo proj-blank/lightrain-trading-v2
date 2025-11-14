@@ -18,7 +18,7 @@ from scripts.db_connection import (
     get_active_positions, add_position, close_position, log_trade,
     get_capital, update_capital, get_available_cash,
     is_position_on_hold, add_circuit_breaker_hold, get_today_trades,
-    get_db_cursor, debit_capital, credit_capital
+    get_db_cursor, debit_capital, credit_capital, get_deployed_capital
 )
 
 # Trading logic imports
@@ -334,15 +334,40 @@ for sell in sell_signals:
 print("\n🔍 PHASE 3: Applying percentage-based 60/20/20 allocation...")
 
 if total_candidates > 0:
+    # Check already deployed capital to prevent over-deployment
+    deployed_capital = get_deployed_capital(strategy=STRATEGY)
+    available_capital = ACCOUNT_SIZE - deployed_capital
+
+    print(f"\n💰 CAPITAL STATUS:")
+    print(f"   Account Size:      ₹{ACCOUNT_SIZE:,.0f}")
+    print(f"   Already Deployed:  ₹{deployed_capital:,.0f}")
+    print(f"   Available:         ₹{available_capital:,.0f}")
+
     # Check for mid-day entry mode (50% position sizing)
     midday_mode = os.getenv('MIDDAY_ENTRY', 'false').lower() == 'true'
     position_multiplier = float(os.getenv('POSITION_SIZE_MULTIPLIER', '1.0'))
 
-    effective_capital = ACCOUNT_SIZE
+    effective_capital = available_capital
     if midday_mode:
-        effective_capital = ACCOUNT_SIZE * position_multiplier
+        effective_capital = available_capital * position_multiplier
         print(f"\n🕥 MID-DAY ENTRY MODE: Using {position_multiplier*100:.0f}% position sizing")
-        print(f"   Effective capital: ₹{effective_capital:,.0f} (of ₹{ACCOUNT_SIZE:,.0f} total)")
+        print(f"   Effective capital: ₹{effective_capital:,.0f} (of ₹{available_capital:,.0f} available)")
+
+    # Safety check: If no capital available, skip trading
+    if effective_capital <= 0:
+        print(f"\n⚠️ NO CAPITAL AVAILABLE FOR NEW POSITIONS")
+        print(f"   All capital (₹{ACCOUNT_SIZE:,.0f}) is already deployed")
+        print(f"   Skipping new entries. Wait for positions to close.")
+
+        # Send Telegram alert
+        send_telegram_message(
+            f"⚠️ DAILY Trading Skipped\n\n"
+            f"Account Size: ₹{ACCOUNT_SIZE:,.0f}\n"
+            f"Deployed: ₹{deployed_capital:,.0f}\n"
+            f"Available: ₹{effective_capital:,.0f}\n\n"
+            f"All capital is deployed. No new positions entered."
+        )
+        sys.exit(0)
 
     # Calculate percentage-based allocation (variable position count!)
     allocation_plan = calculate_percentage_allocation(

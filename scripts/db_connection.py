@@ -62,6 +62,32 @@ def get_active_positions(strategy: str = None) -> List[Dict]:
             """)
         return cur.fetchall()
 
+def get_deployed_capital(strategy: str = None) -> float:
+    """
+    Calculate total capital deployed in active (HOLD) positions
+
+    Args:
+        strategy: Optional strategy filter ('DAILY', 'SWING', etc.)
+
+    Returns:
+        Total deployed capital (entry_price * quantity) for active positions
+    """
+    with get_db_cursor() as cur:
+        if strategy:
+            cur.execute("""
+                SELECT COALESCE(SUM(entry_price * quantity), 0) as deployed_capital
+                FROM positions
+                WHERE status = 'HOLD' AND strategy = %s
+            """, (strategy,))
+        else:
+            cur.execute("""
+                SELECT COALESCE(SUM(entry_price * quantity), 0) as deployed_capital
+                FROM positions
+                WHERE status = 'HOLD'
+            """)
+        result = cur.fetchone()
+        return float(result['deployed_capital']) if result else 0.0
+
 def add_position(ticker: str, strategy: str, entry_price: float, quantity: int,
                 stop_loss: float, take_profit: float, category: str,
                 entry_date: str = None,
