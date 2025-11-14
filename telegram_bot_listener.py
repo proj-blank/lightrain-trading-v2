@@ -154,6 +154,7 @@ def handle_help():
 /status - System status
 /positions - Active positions (with P&L)
 /pnl - Portfolio P&L summary
+/gc - Global market check (regime + live data)
 /daily - DAILY strategy positions
 /swing - SWING strategy positions
 /cap - Capital tracker
@@ -415,6 +416,95 @@ def handle_pnl():
         import traceback
         return f"❌ Error: {e}\n{traceback.format_exc()[:300]}"
 
+def handle_gc():
+    """Global Check - Show market regime and current status"""
+    try:
+        import json
+
+        result = "<b>🌍 Global Market Check</b>\n"
+        result += f"⏰ {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S IST')}\n\n"
+
+        # Read pre-market regime file
+        regime_file = '/home/ubuntu/trading/data/market_regime.json'
+        if not os.path.exists(regime_file):
+            return "❌ Regime data not found. Run global check at 8:30 AM first."
+
+        with open(regime_file, 'r') as f:
+            regime_data = json.load(f)
+
+        # Pre-market regime (from 8:30 AM)
+        regime = regime_data.get('regime', 'UNKNOWN')
+        score = regime_data.get('score', 0)
+        allow_entries = regime_data.get('allow_new_entries', True)
+        timestamp = regime_data.get('timestamp', 'Unknown')
+
+        regime_emoji = "🟢" if regime == "BULL" else "🔴" if regime == "BEAR" else "🟡"
+        entry_emoji = "✅" if allow_entries else "🚫"
+
+        result += f"<b>Pre-Market Regime (8:30 AM):</b>\n"
+        result += f"  {regime_emoji} {regime} (Score: {score:.1f})\n"
+        result += f"  {entry_emoji} New Entries: {'ALLOWED' if allow_entries else 'BLOCKED'}\n\n"
+
+        # Get current live Nifty
+        result += "<b>Current Market (Live):</b>\n"
+        if ANGELONE_AVAILABLE:
+            try:
+                session = get_angel_session()
+                if session:
+                    ltp_data = session.ltpData('NSE', 'NIFTY 50', '99926000')
+                    if ltp_data and ltp_data.get('status'):
+                        data = ltp_data.get('data', {})
+                        ltp = float(data.get('ltp', 0))
+                        open_price = float(data.get('open', 0))
+                        if open_price > 0:
+                            change_pct = ((ltp - open_price) / open_price) * 100
+                            change_emoji = "🟢" if change_pct >= 0 else "🔴"
+                            result += f"  {change_emoji} Nifty 50: {ltp:.2f} ({change_pct:+.2f}%)\n"
+
+                            # Compare with morning
+                            morning_nifty = regime_data.get('indicators', {}).get('nifty', {}).get('price', 0)
+                            if morning_nifty > 0:
+                                intraday_move = ((ltp - morning_nifty) / morning_nifty) * 100
+                                move_emoji = "📈" if intraday_move > 0 else "📉"
+                                result += f"  {move_emoji} Since 8:30 AM: {intraday_move:+.2f}%\n"
+            except Exception as e:
+                result += f"  ⚠️ Live data unavailable: {e}\n"
+
+        result += "\n<b>Overnight Indicators:</b>\n"
+
+        # US markets
+        indicators = regime_data.get('indicators', {})
+        sp500 = indicators.get('sp500', {})
+        nasdaq = indicators.get('nasdaq', {})
+
+        sp500_chg = sp500.get('change_pct', 0)
+        nasdaq_chg = nasdaq.get('change_pct', 0)
+
+        sp500_emoji = "🟢" if sp500_chg >= 0 else "🔴"
+        nasdaq_emoji = "🟢" if nasdaq_chg >= 0 else "🔴"
+
+        result += f"  {sp500_emoji} S&P 500: {sp500_chg:+.2f}%\n"
+        result += f"  {nasdaq_emoji} Nasdaq: {nasdaq_chg:+.2f}%\n"
+
+        # VIX
+        vix = indicators.get('vix', {})
+        india_vix = indicators.get('india_vix', {})
+
+        vix_val = vix.get('value', 0)
+        india_vix_val = india_vix.get('value', 0)
+        vix_level = vix.get('level', 'NORMAL')
+
+        vix_emoji = "🟢" if vix_val < 20 else "🟡" if vix_val < 30 else "🔴"
+        result += f"  {vix_emoji} VIX: {vix_val:.1f} ({vix_level})\n"
+        result += f"  India VIX: {india_vix_val:.2f}\n"
+
+        result += f"\n<i>Regime updated at {timestamp[:16]}</i>"
+
+        return result
+    except Exception as e:
+        import traceback
+        return f"❌ Error: {e}\n{traceback.format_exc()[:300]}"
+
 def handle_hold(ticker):
     """Mark position to hold (suppress alerts, wait for hard stop)"""
     try:
@@ -546,6 +636,8 @@ def process_command(text):
         return handle_positions()
     elif cmd == '/pnl':
         return handle_pnl()
+    elif cmd == '/gc':
+        return handle_gc()
     elif cmd == '/daily':
         return handle_positions('DAILY')
     elif cmd == '/swing':
