@@ -334,10 +334,20 @@ for sell in sell_signals:
 print("\n🔍 PHASE 3: Applying percentage-based 60/20/20 allocation...")
 
 if total_candidates > 0:
+    # Check for mid-day entry mode (50% position sizing)
+    midday_mode = os.getenv('MIDDAY_ENTRY', 'false').lower() == 'true'
+    position_multiplier = float(os.getenv('POSITION_SIZE_MULTIPLIER', '1.0'))
+
+    effective_capital = ACCOUNT_SIZE
+    if midday_mode:
+        effective_capital = ACCOUNT_SIZE * position_multiplier
+        print(f"\n🕥 MID-DAY ENTRY MODE: Using {position_multiplier*100:.0f}% position sizing")
+        print(f"   Effective capital: ₹{effective_capital:,.0f} (of ₹{ACCOUNT_SIZE:,.0f} total)")
+
     # Calculate percentage-based allocation (variable position count!)
     allocation_plan = calculate_percentage_allocation(
         candidates_by_category,
-        total_capital=ACCOUNT_SIZE,
+        total_capital=effective_capital,
         target_allocation={'large': 0.60, 'mid': 0.20, 'micro': 0.20},
         min_position_size=20000,  # Min ₹20K per position
         max_position_size=150000,  # Max ₹150K per position

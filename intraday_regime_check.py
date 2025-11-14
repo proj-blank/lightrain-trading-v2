@@ -204,6 +204,76 @@ def check_intraday_regime():
         send_telegram(message)
         print(f"\n✅ Sent Telegram alert")
 
+        # Adaptive mid-day entry logic (10:30 AM check)
+        current_hour = now.hour
+        current_minute = now.minute
+
+        # Check if this is the 10:30 AM run (between 10:20-10:40 AM)
+        is_1030_check = (current_hour == 10 and 20 <= current_minute <= 40)
+
+        if is_1030_check:
+            print(f"\n🔄 10:30 AM Confirmation Check - Evaluating mid-day entry conditions...")
+
+            # Condition 1: Morning regime was BEAR
+            if morning_regime == "BEAR":
+                print(f"  ✓ Morning was BEAR")
+
+                # Condition 2: Current (10:30 AM) breadth is 67%+
+                if breadth_pct >= 67:
+                    print(f"  ✓ Current breadth: {breadth_pct:.0f}% (≥67%)")
+
+                    # Condition 3: Check if 9:30 AM check also showed 67%+ breadth
+                    try:
+                        # Read the override file that was saved at 9:30 AM
+                        import subprocess
+                        from datetime import timedelta
+
+                        # Check file modification time to ensure it's from today's 9:30 AM
+                        if os.path.exists(intraday_file):
+                            file_mtime = datetime.fromtimestamp(os.path.getmtime(intraday_file), ist)
+                            time_diff = (now - file_mtime).total_seconds()
+
+                            # If file was updated within last 90 minutes, it's from 9:30 AM check
+                            if time_diff < 5400:  # 90 minutes
+                                with open(intraday_file, 'r') as f:
+                                    prev_data = json.load(f)
+
+                                prev_breadth = prev_data.get('breadth_pct', 0)
+
+                                if prev_breadth >= 67:
+                                    print(f"  ✓ 9:30 AM breadth: {prev_breadth:.0f}% (≥67%)")
+                                    print(f"\n🎯 ALL CONDITIONS MET - Triggering mid-day entry!")
+
+                                    # Send alert
+                                    trigger_msg = f"<b>🚀 MID-DAY ENTRY TRIGGERED</b>\n\n"
+                                    trigger_msg += f"<b>Conditions Met:</b>\n"
+                                    trigger_msg += f"  ✓ Morning: BEAR\n"
+                                    trigger_msg += f"  ✓ 9:30 AM: {prev_breadth:.0f}% breadth\n"
+                                    trigger_msg += f"  ✓ 10:30 AM: {breadth_pct:.0f}% breadth\n\n"
+                                    trigger_msg += f"🔄 Running DAILY strategy with 50% position sizing\n"
+                                    trigger_msg += f"⏰ {now.strftime('%H:%M IST')}"
+                                    send_telegram(trigger_msg)
+
+                                    # Trigger mid-day trading
+                                    subprocess.run([
+                                        'bash',
+                                        '/home/ubuntu/trading/run_midday_trading.sh'
+                                    ], check=False)
+
+                                    print(f"✅ Mid-day trading triggered!")
+                                else:
+                                    print(f"  ✗ 9:30 AM breadth: {prev_breadth:.0f}% (<67%) - Conditions not met")
+                            else:
+                                print(f"  ⚠️ 9:30 AM data too old or missing - Skipping mid-day entry")
+                        else:
+                            print(f"  ⚠️ 9:30 AM data not found - Skipping mid-day entry")
+                    except Exception as e:
+                        print(f"  ⚠️ Error checking 9:30 AM data: {e}")
+                else:
+                    print(f"  ✗ Current breadth: {breadth_pct:.0f}% (<67%) - Conditions not met")
+            else:
+                print(f"  ✗ Morning was {morning_regime} (not BEAR) - Mid-day entry not needed")
+
         print(f"\n{'='*60}")
 
     except Exception as e:
