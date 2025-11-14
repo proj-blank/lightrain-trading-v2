@@ -17,7 +17,7 @@ load_dotenv()
 
 # AngelOne credentials
 ANGEL_API_KEY = os.getenv('ANGELONE_API_KEY')
-ANGEL_CLIENT_CODE = os.getenv('ANGELONE_CLIENT_CODE')
+ANGEL_CLIENT_CODE = os.getenv('ANGELONE_CLIENT_ID')  # Note: .env uses CLIENT_ID
 ANGEL_PASSWORD = os.getenv('ANGELONE_PASSWORD')
 ANGEL_TOTP_SECRET = os.getenv('ANGELONE_TOTP_SECRET')
 
