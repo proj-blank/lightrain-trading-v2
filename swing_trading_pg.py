@@ -45,6 +45,7 @@ from scripts.risk_manager import check_circuit_breaker, analyze_drop_reason, for
 from scripts.telegram_bot import check_if_position_on_hold
 from scripts.rs_rating import RelativeStrengthAnalyzer
 from scripts.percentage_based_allocation import calculate_percentage_allocation, select_positions_for_entry
+from scripts.angelone_price_fetcher import get_live_price
 import yfinance as yf
 
 # Configuration
@@ -437,6 +438,10 @@ def smart_scan_with_allocation(portfolio, current_date, cash):
                 # Download data
                 df = yf.download(ticker, period='3mo', interval='1d', progress=False)
 
+                # Flatten MultiIndex columns if present (yfinance bug fix)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
                 if df.empty or len(df) < 50:
                     continue
 
@@ -507,10 +512,14 @@ def smart_scan_with_allocation(portfolio, current_date, cash):
 
     for position in selected_positions_list:
         ticker = position['ticker']
-        price = float(position["price"])  # Ensure float conversion
+        yahoo_price = float(position["price"])  # Ensure float conversion
         score = position['score']
         capital_allocated = position['capital_allocated']
         df = position['df']
+
+        # Get live price from AngelOne (with Yahoo fallback)
+        price, price_source = get_live_price(ticker, yahoo_price)
+        log(f"  💰 {ticker}: ₹{price:.2f} ({price_source.upper()})")
 
         # Pre-execution checks
         log(f"\n  🔍 Checking {ticker}...")
@@ -536,6 +545,11 @@ def smart_scan_with_allocation(portfolio, current_date, cash):
 
         # Get ATR for this stock (need to download data again)
         df = yf.download(ticker, period='3mo', interval='1d', progress=False)
+
+        # Flatten MultiIndex columns if present (yfinance bug fix)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
         atr = calculate_atr(df, period=14)
 
         # Calculate recent 5-day low for support stop
@@ -688,6 +702,11 @@ def send_telegram_summary(portfolio, exits, entries, total_pnl):
                 # Fetch current price
                 try:
                     df = yf.download(ticker, period='1d', interval='1d', progress=False)
+
+                    # Flatten MultiIndex columns if present (yfinance bug fix)
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+
                     if not df.empty:
                         current_price = float(df['Close'].iloc[-1])
 
@@ -781,6 +800,11 @@ def main():
         for ticker in portfolio_tickers:
             try:
                 df = yf.download(ticker, period='1mo', interval='1d', progress=False)
+
+                # Flatten MultiIndex columns if present (yfinance bug fix)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
                 if not df.empty:
                     stock_data[ticker] = df
             except:
