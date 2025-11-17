@@ -96,9 +96,17 @@ if os.path.exists(regime_file):
         )
         sys.exit(0)
     else:
+        # Store regime multiplier for position sizing
+        REGIME_MULTIPLIER = regime.get('position_sizing_multiplier', 1.0)
+
         print(f"✅ Global regime: {regime.get('regime', 'UNKNOWN')} (score: {regime.get('score', 0)})")
         print(f"   Allow entries: True")
-        print(f"   Position multiplier: {regime.get('position_sizing_multiplier', 1.0)*100}%")
+        print(f"   Position multiplier: {REGIME_MULTIPLIER*100}%")
+else:
+    # No regime data found, default to 100%
+    REGIME_MULTIPLIER = 1.0
+    print("⚠️ No market regime data found (run global_market_filter.py at 8:30 AM)")
+    print("   Using default 100% position sizing")
 
 # Load stocks from screened_stocks table
 print("\n📥 Loading stocks from NSE universe...")
@@ -352,13 +360,21 @@ if total_candidates > 0:
     print(f"   Available:         ₹{available_capital:,.0f}")
 
     # Check for mid-day entry mode (50% position sizing)
+    # Apply regime-based position sizing multiplier
     midday_mode = os.getenv('MIDDAY_ENTRY', 'false').lower() == 'true'
     position_multiplier = float(os.getenv('POSITION_SIZE_MULTIPLIER', '1.0'))
 
-    effective_capital = available_capital
+    # Start with regime multiplier (from global market check)
+    effective_capital = available_capital * REGIME_MULTIPLIER
+
+    # If midday mode, apply additional multiplier
     if midday_mode:
-        effective_capital = available_capital * position_multiplier
-        print(f"\n🕥 MID-DAY ENTRY MODE: Using {position_multiplier*100:.0f}% position sizing")
+        effective_capital = effective_capital * position_multiplier
+        print(f"\n🕥 MID-DAY ENTRY MODE: Applying additional {position_multiplier*100:.0f}% multiplier")
+        print(f"   Combined multiplier: {REGIME_MULTIPLIER * position_multiplier * 100:.0f}%")
+        print(f"   Effective capital: ₹{effective_capital:,.0f} (of ₹{available_capital:,.0f} available)")
+    else:
+        print(f"\n💰 Regime-based position sizing: {REGIME_MULTIPLIER*100:.0f}%")
         print(f"   Effective capital: ₹{effective_capital:,.0f} (of ₹{available_capital:,.0f} available)")
 
     # Safety check: If no capital available, skip trading
