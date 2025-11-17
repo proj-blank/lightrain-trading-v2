@@ -45,6 +45,9 @@ except ImportError:
     def analyze_position_with_ai(*args, **kwargs):
         return None
 
+# AngelOne price fetcher
+from scripts.angelone_price_fetcher import get_live_price
+
 # Configuration
 ACCOUNT_SIZE = 500000
 # NO MAX_POSITIONS - using percentage-based allocation (60/20/20 split)
@@ -149,6 +152,11 @@ for i, ticker in enumerate(stocks_to_screen, 1):
 
     try:
         df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+
+        # Flatten MultiIndex columns if present (yfinance bug fix)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
         if not df.empty and len(df) >= 60:
             stock_data[ticker] = df
     except Exception as e:
@@ -389,16 +397,20 @@ if total_candidates > 0:
     for position in selected_positions:
         ticker = position['ticker']
         score = position['score']
-        price = position.get('price')
+        yahoo_price = position.get('price')
         capital_allocated = position['capital_allocated']
         df = position['df']
 
-        # Safety check: Ensure price is valid
-        if not price or not isinstance(price, (int, float)):
-            print(f"   ⚠️ SKIPPING {ticker}: Invalid price data (got {type(price).__name__}: {price})")
+        # Safety check: Ensure yahoo_price is valid
+        if not yahoo_price or not isinstance(yahoo_price, (int, float)):
+            print(f"   ⚠️ SKIPPING {ticker}: Invalid price data (got {type(yahoo_price).__name__}: {yahoo_price})")
             continue
 
-        price = float(price)  # Ensure it's float
+        yahoo_price = float(yahoo_price)  # Ensure it's float
+
+        # Get live price from AngelOne (with Yahoo fallback)
+        price, price_source = get_live_price(ticker, yahoo_price)
+        print(f"   💰 {ticker}: ₹{price:.2f} ({price_source.upper()})")
 
         # Calculate quantity
         qty = int(capital_allocated // price)
