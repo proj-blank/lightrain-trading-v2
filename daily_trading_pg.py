@@ -457,15 +457,15 @@ if total_candidates > 0:
         stop_loss = price - (2 * atr) if atr > 0 else price * 0.98  # 2 ATR or 2%
 
         # Calculate TP based on risk:reward ratio
-        # Target at least 1.5x the risk, OR ₹1000 TOTAL profit
+        # Target at least 1.5x the risk, OR ₹1000 TOTAL profit (whichever comes FIRST)
         sl_distance = price - stop_loss
         rr_target_per_share = sl_distance * 1.5  # 1.5:1 risk:reward per share
 
         # Minimum profit per share to achieve ₹1000 total profit
         min_profit_per_share = 1000 / qty if qty > 0 else 1000
 
-        # Use whichever gives better profit
-        target_profit_per_share = max(rr_target_per_share, min_profit_per_share)
+        # Exit at whichever threshold comes FIRST (min, not max)
+        target_profit_per_share = min(rr_target_per_share, min_profit_per_share)
         take_profit = price + target_profit_per_share
 
         # Get AI validation BEFORE adding position (Claude 3 Haiku)
