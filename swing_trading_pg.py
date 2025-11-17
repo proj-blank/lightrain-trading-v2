@@ -496,7 +496,7 @@ def smart_scan_with_allocation(portfolio, current_date, cash):
 
     allocation_plan = calculate_percentage_allocation(
         candidates,
-        total_capital=account_size,
+        total_capital=account_size * REGIME_MULTIPLIER,  # Apply regime-based position sizing
         target_allocation={'large': 0.60, 'mid': 0.20, 'micro': 0.20},
         min_position_size=20000,  # Min ₹20K per position
         max_position_size=100000,  # Max ₹100K per position (swing holds longer, smaller sizes)
@@ -820,11 +820,18 @@ def main():
         log("\nℹ️ No open positions, skipping exit checks")
 
     # 2. Smart scan for entries with 60/20/20 allocation
-    log("\n🔍 Smart Screening with 60/20/20 Allocation (NSE Universe)...")
-    cash = get_cash()
-    log(f"💰 Available cash: ₹{cash:,.0f}")
+    entries = []
 
-    portfolio, entries = smart_scan_with_allocation(portfolio, current_date, cash)
+    # Check global regime before allowing new entries
+    if not ALLOW_NEW_ENTRIES:
+        log("\n⛔ BEAR REGIME: Skipping entry scan (allow_new_entries=False)")
+        log("   Focus: Managing existing positions only")
+    else:
+        log("\n🔍 Smart Screening with 60/20/20 Allocation (NSE Universe)...")
+        cash = get_cash()
+        log(f"💰 Available cash: ₹{cash:,.0f}")
+
+        portfolio, entries = smart_scan_with_allocation(portfolio, current_date, cash)
 
     if entries:
         log(f"\n✅ Entered {len(entries)} new positions")
