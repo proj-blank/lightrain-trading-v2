@@ -391,6 +391,24 @@ if total_candidates > 0:
     # Get selected positions (already filtered and scored)
     selected_positions = select_positions_for_entry(allocation_plan)
 
+    # Send pre-trading Telegram notification with regime info
+    if os.path.exists(regime_file):
+        with open(regime_file, 'r') as f:
+            regime_data = json.load(f)
+
+        regime_name = regime_data.get('regime', 'UNKNOWN')
+        regime_score = regime_data.get('score', 0)
+
+        pre_trade_msg = f"📊 <b>DAILY TRADING - Pre-Entry Summary</b>\n\n"
+        pre_trade_msg += f"<b>Market Regime (8:30 AM):</b> {regime_name}\n"
+        pre_trade_msg += f"<b>Regime Score:</b> {regime_score:.1f}\n\n"
+        pre_trade_msg += f"<b>Position Sizing:</b> 100% (Full allocation)\n"
+        pre_trade_msg += f"<b>Positions to Open:</b> {len(selected_positions)}\n"
+        pre_trade_msg += f"<b>Capital Deployment:</b> ₹{ACCOUNT_SIZE:,}\n\n"
+        pre_trade_msg += f"⏰ Opening positions now..."
+
+        send_telegram_message(pre_trade_msg)
+
     print(f"\n🔍 PHASE 4: Executing {len(selected_positions)} selected positions...")
 
     # Execute selected positions
