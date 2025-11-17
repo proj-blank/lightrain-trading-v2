@@ -88,7 +88,7 @@ NSE_SYMBOL_TOKENS = {
     'SBILIFE': '21808',
     'TATACONSUM': '3432',
     'ADANIGREEN': '25317',
-    'ADANIPOWER': '25',
+    # 'ADANIPOWER': '25',  # WRONG TOKEN - returns ₹2462 instead of ₹153 - use Yahoo fallback
     'APOLLOHOSP': '157',
     'APOLLOTYRE': '163',
     'ASHOKLEY': '212',

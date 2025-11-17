@@ -55,7 +55,7 @@ def analyze_volume(df, period=20):
     current_volume = float(current_vol.item() if hasattr(current_vol, 'item') else current_vol)
 
     avg_vol = avg_volume.iloc[-1]
-    avg_vol_value = float(avg_vol.item() if hasattr(avg_vol, 'item') else avg_vol) if not pd.isna(avg_vol).any() else 1
+    avg_vol_value = float(avg_vol.item() if hasattr(avg_vol, 'item') else avg_vol) if not pd.isna(avg_vol) else 1
 
     volume_ratio = current_volume / avg_vol_value if avg_vol_value > 0 else 1
 

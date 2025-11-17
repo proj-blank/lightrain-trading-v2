@@ -366,7 +366,7 @@ def check_exits(portfolio, stock_data, current_date):
 
     return portfolio, exits
 
-def smart_scan_with_allocation(portfolio, current_date, cash):
+def smart_scan_with_allocation(portfolio, current_date, cash, regime_multiplier=1.0):
     """Percentage-based screening with 60/20/20 capital allocation (NO FIXED POSITION COUNTS)"""
     entries = []
     active_positions = len(portfolio)
@@ -452,7 +452,13 @@ def smart_scan_with_allocation(portfolio, current_date, cash):
                     continue  # Skip weak stocks
 
                 # Generate signal (only for stocks that passed RS filter)
+                print(f"DEBUG: Generating signal for {ticker} (RS={rs_rating})")
                 signal, score, details = generate_signal_swing(df, min_score=MIN_SIGNAL_SCORE)
+                print(f"DEBUG: {ticker} -> Signal={signal}, Score={score:.1f}")
+
+                # DEBUG: Log ALL scores for RS-filtered stocks (temporary)
+                with open('/home/ubuntu/trading/logs/swing_scores_debug.txt', 'a') as f:
+                    f.write(f"{ticker}|{signal}|{score:.1f}|{rs_rating}\n")
 
                 if signal == "BUY" and score >= MIN_SIGNAL_SCORE:
                     current_price = float(df['Close'].iloc[-1])
@@ -474,6 +480,7 @@ def smart_scan_with_allocation(portfolio, current_date, cash):
                     log(f"  ✅ {ticker}: Score {score:.0f} | RS {rs_rating} | ₹{current_price:.2f}")
 
             except Exception as e:
+                print(f"ERROR processing {ticker}: {e}")
                 continue
 
     # Count candidates
@@ -496,7 +503,7 @@ def smart_scan_with_allocation(portfolio, current_date, cash):
 
     allocation_plan = calculate_percentage_allocation(
         candidates,
-        total_capital=account_size * REGIME_MULTIPLIER,  # Apply regime-based position sizing
+        total_capital=account_size * regime_multiplier,  # Apply regime-based position sizing
         target_allocation={'large': 0.60, 'mid': 0.20, 'micro': 0.20},
         min_position_size=20000,  # Min ₹20K per position
         max_position_size=100000,  # Max ₹100K per position (swing holds longer, smaller sizes)
@@ -597,7 +604,8 @@ def smart_scan_with_allocation(portfolio, current_date, cash):
 
             # Send AI opinion to Telegram
             emoji = get_verdict_emoji(ai_result['verdict'])
-            ai_msg = f"  🤖 AI: {emoji} {ai_result['verdict']} ({ai_result['confidence']:.0%}) - {ai_result['reasoning']}"
+            ticker_clean = ticker.replace('.NS', '')
+            ai_msg = f"  🤖 AI for {ticker_clean}: {emoji} {ai_result['verdict']} ({ai_result['confidence']:.0%}) - {ai_result['reasoning']}"
             send_telegram_message(ai_msg)
 
             log(f"  🤖 AI Opinion: {ai_result['verdict']} ({ai_result['confidence']:.0%})")
@@ -831,7 +839,7 @@ def main():
         cash = get_cash()
         log(f"💰 Available cash: ₹{cash:,.0f}")
 
-        portfolio, entries = smart_scan_with_allocation(portfolio, current_date, cash)
+        portfolio, entries = smart_scan_with_allocation(portfolio, current_date, cash, REGIME_MULTIPLIER)
 
     if entries:
         log(f"\n✅ Entered {len(entries)} new positions")
