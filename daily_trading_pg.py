@@ -36,13 +36,13 @@ from scripts.telegram_bot import (
 from scripts.rs_rating import RelativeStrengthAnalyzer
 from scripts.percentage_based_allocation import calculate_percentage_allocation, select_positions_for_entry
 
-# Optional AI analyzer (if available)
+# AI analyzer with news (ai_news_analyzer.py)
 try:
-    from scripts.ai_analyzer import analyze_position_with_AI
+    from scripts.ai_news_analyzer import get_ai_recommendation
     AI_ANALYSIS_AVAILABLE = True
 except ImportError:
     AI_ANALYSIS_AVAILABLE = False
-    def analyze_position_with_ai(*args, **kwargs):
+    def get_ai_recommendation(*args, **kwargs):
         return None
 
 # AngelOne price fetcher
@@ -750,12 +750,21 @@ for _, row in portfolio[portfolio['Status'] == 'HOLD'].iterrows():
             # Analyze drop reason
             drop_analysis = analyze_drop_reason(ticker)
 
-            # Get AI analysis
+            # Get AI analysis with news
             ai_analysis = None
             try:
-                ai_analysis = analyze_position_with_ai(
-                    ticker, entry_price, current_price, entry_date
+                loss_pct = analysis['loss_pct']
+                ai_analysis = get_ai_recommendation(
+                    ticker=ticker,
+                    technical_analysis=drop_analysis,
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    loss_pct=loss_pct
                 )
+                if ai_analysis:
+                    print(f"    🤖 AI: {ai_analysis.get('ai_recommendation')} ({ai_analysis.get('ai_confidence')})")
+                    if ai_analysis.get('news_count', 0) > 0:
+                        print(f"    📰 Analyzed {ai_analysis['news_count']} recent news articles")
             except Exception as e:
                 print(f"    ⚠️ AI analysis failed: {e}")
 
