@@ -28,6 +28,9 @@ try:
 except ImportError:
     YFINANCE_AVAILABLE = False
 
+# Import GlobalMarketFilter for /gc command
+from global_market_filter import GlobalMarketFilter
+
 # Import Angel One SmartAPI for real-time index data
 try:
     from SmartApi import SmartConnect
@@ -418,7 +421,7 @@ def handle_pnl():
         return f"❌ Error: {e}\n{traceback.format_exc()[:300]}"
 
 def handle_gc():
-    """Global Check - LIVE global regime with real-time scoring (Nov 19, 2024)"""
+    """Global Check - LIVE global regime using GlobalMarketFilter (refactored Nov 19, 2024)"""
     try:
         import json
 
@@ -436,156 +439,64 @@ def handle_gc():
             morning_regime = regime_data.get('regime', 'UNKNOWN')
             morning_score = regime_data.get('score', 0)
 
-        # Fetch LIVE global data
+        # Use GlobalMarketFilter for live data (same logic as 8:30 AM check)
+        filter_system = GlobalMarketFilter()
+        filter_system.fetch_us_markets()      # S&P Futures
+        filter_system.fetch_asian_markets()   # Nikkei + Hang Seng
+        filter_system.fetch_gold()             # Gold (inverse)
+        filter_system.fetch_vix()              # VIX
+
+        # Analyze regime (does NOT save to file/database)
+        analysis = filter_system.analyze_regime()
+
+        # Format live market data
         result += "<b>━━━ LIVE GLOBAL MARKETS ━━━</b>\n"
-        current_score = 0
 
-        # 1. S&P Futures (LIVE)
-        try:
-            sp_fut = yf.Ticker('ES=F').history(period='2d')
-            if len(sp_fut) >= 2:
-                sp_change = ((sp_fut['Close'].iloc[-1] / sp_fut['Close'].iloc[-2]) - 1) * 100
-                sp_emoji = "🟢" if sp_change >= 0 else "🔴"
+        # S&P Futures
+        if 'sp_futures' in filter_system.indicators:
+            sp = filter_system.indicators['sp_futures']
+            sp_emoji = "🟢" if sp['change_pct'] >= 0 else "🔴"
+            result += f"{sp_emoji} S&P Futures: {sp['change_pct']:+.2f}%\n"
 
-                # Score calculation (35% weight)
-                if sp_change > 1:
-                    sp_pts = 2
-                elif sp_change > 0:
-                    sp_pts = 1
-                elif sp_change > -1:
-                    sp_pts = -1
-                else:
-                    sp_pts = -2
-                current_score += sp_pts
+        # Nikkei
+        if 'nikkei' in filter_system.indicators:
+            nikkei = filter_system.indicators['nikkei']
+            nikkei_emoji = "🟢" if nikkei['change_pct'] >= 0 else "🔴"
+            result += f"{nikkei_emoji} Nikkei: {nikkei['change_pct']:+.2f}%\n"
 
-                result += f"{sp_emoji} S&P Futures: {sp_change:+.2f}% [{sp_pts:+d}pts]\n"
-        except:
-            result += f"⚠️ S&P Futures: Unavailable\n"
+        # Hang Seng
+        if 'hang_seng' in filter_system.indicators:
+            hs = filter_system.indicators['hang_seng']
+            hs_emoji = "🟢" if hs['change_pct'] >= 0 else "🔴"
+            result += f"{hs_emoji} Hang Seng: {hs['change_pct']:+.2f}%\n"
 
-        # 2. Nikkei (LIVE)
-        try:
-            nikkei = yf.Ticker('^N225').history(period='2d')
-            if len(nikkei) >= 2:
-                nikkei_change = ((nikkei['Close'].iloc[-1] / nikkei['Close'].iloc[-2]) - 1) * 100
-                nikkei_emoji = "🟢" if nikkei_change >= 0 else "🔴"
+        # Gold (inverse)
+        if 'gold' in filter_system.indicators:
+            gold = filter_system.indicators['gold']
+            gold_emoji = "🟢" if gold['change_pct'] < 0 else "🔴" if gold['change_pct'] > 0 else "⚪"
+            result += f"{gold_emoji} Gold: {gold['change_pct']:+.2f}% (inverse)\n"
 
-                # Score calculation (25% weight)
-                if nikkei_change > 1:
-                    nikkei_pts = 2
-                elif nikkei_change > 0:
-                    nikkei_pts = 1
-                elif nikkei_change > -1:
-                    nikkei_pts = -1
-                else:
-                    nikkei_pts = -2
-                current_score += nikkei_pts
+        # VIX
+        if 'vix' in filter_system.indicators:
+            vix = filter_system.indicators['vix']
+            vix_emoji = "🟢" if vix['value'] < 20 else "🟡" if vix['value'] < 30 else "🔴"
+            result += f"{vix_emoji} VIX: {vix['value']:.1f} ({vix['level']})\n"
 
-                result += f"{nikkei_emoji} Nikkei: {nikkei_change:+.2f}% [{nikkei_pts:+d}pts]\n"
-        except:
-            result += f"⚠️ Nikkei: Unavailable\n"
-
-        # 3. Hang Seng (LIVE)
-        try:
-            hs = yf.Ticker('^HSI').history(period='2d')
-            if len(hs) >= 2:
-                hs_change = ((hs['Close'].iloc[-1] / hs['Close'].iloc[-2]) - 1) * 100
-                hs_emoji = "🟢" if hs_change >= 0 else "🔴"
-
-                # Score calculation (20% weight)
-                if hs_change > 1:
-                    hs_pts = 1.5
-                elif hs_change > 0:
-                    hs_pts = 1
-                elif hs_change > -1:
-                    hs_pts = -1
-                else:
-                    hs_pts = -1.5
-                current_score += hs_pts
-
-                result += f"{hs_emoji} Hang Seng: {hs_change:+.2f}% [{hs_pts:+.1f}pts]\n"
-        except:
-            result += f"⚠️ Hang Seng: Unavailable\n"
-
-        # 4. Gold (LIVE - INVERSE)
-        try:
-            gold = yf.Ticker('GC=F').history(period='2d')
-            if len(gold) >= 2:
-                gold_change = ((gold['Close'].iloc[-1] / gold['Close'].iloc[-2]) - 1) * 100
-
-                # Inverse scoring (10% weight)
-                if gold_change > 1.5:
-                    gold_pts = -2
-                    gold_signal = "RISK-OFF"
-                elif gold_change > 0.5:
-                    gold_pts = -1
-                    gold_signal = "Risk-off"
-                elif gold_change < -1.5:
-                    gold_pts = 2
-                    gold_signal = "RISK-ON"
-                elif gold_change < -0.5:
-                    gold_pts = 1
-                    gold_signal = "Risk-on"
-                else:
-                    gold_pts = 0
-                    gold_signal = "Neutral"
-                current_score += gold_pts
-
-                gold_emoji = "🟢" if gold_pts > 0 else "🔴" if gold_pts < 0 else "⚪"
-                result += f"{gold_emoji} Gold: {gold_change:+.2f}% ({gold_signal}) [{gold_pts:+d}pts]\n"
-        except:
-            result += f"⚠️ Gold: Unavailable\n"
-
-        # 5. VIX (LIVE)
-        try:
-            vix = yf.Ticker('^VIX').history(period='1d')
-            if not vix.empty:
-                vix_val = vix['Close'].iloc[-1]
-
-                # Score calculation (10% weight)
-                if vix_val < 15:
-                    vix_pts = 2
-                    vix_level = "LOW"
-                elif vix_val < 20:
-                    vix_pts = 1
-                    vix_level = "NORMAL"
-                elif vix_val < 30:
-                    vix_pts = -1
-                    vix_level = "ELEVATED"
-                else:
-                    vix_pts = -3
-                    vix_level = "HIGH"
-                current_score += vix_pts
-
-                vix_emoji = "🟢" if vix_val < 20 else "🟡" if vix_val < 30 else "🔴"
-                result += f"{vix_emoji} VIX: {vix_val:.1f} ({vix_level}) [{vix_pts:+d}pts]\n"
-        except:
-            result += f"⚠️ VIX: Unavailable\n"
-
-        # Calculate current regime
-        if current_score >= 4:
-            current_regime = "BULL"
-            current_sizing = "100%"
-        elif current_score >= 1:
-            current_regime = "NEUTRAL"
-            current_sizing = "75%"
-        elif current_score >= -2:
-            current_regime = "CAUTION"
-            current_sizing = "50%"
-        else:
-            current_regime = "BEAR"
-            current_sizing = "0% (HALT)"
-
-        regime_emoji = "🟢" if current_regime == "BULL" else "🟡" if current_regime in ["NEUTRAL", "CAUTION"] else "🔴"
+        # Regime analysis
+        regime_emoji = "🟢" if analysis['regime'] == "BULL" else "🟡" if analysis['regime'] in ["NEUTRAL", "CAUTION"] else "🔴"
+        sizing_pct = f"{int(analysis['position_sizing_multiplier'] * 100)}%"
+        if not analysis['allow_new_entries']:
+            sizing_pct += " (HALT)"
 
         result += f"\n<b>━━━ REGIME ANALYSIS ━━━</b>\n"
-        result += f"<b>Total Score:</b> {current_score:.1f}\n"
-        result += f"<b>Current Regime:</b> {regime_emoji} {current_regime}\n"
-        result += f"<b>Position Sizing:</b> {current_sizing}\n\n"
+        result += f"<b>Total Score:</b> {analysis['score']:.1f}\n"
+        result += f"<b>Current Regime:</b> {regime_emoji} {analysis['regime']}\n"
+        result += f"<b>Position Sizing:</b> {sizing_pct}\n\n"
 
         # Comparison with morning
         result += f"<b>Baseline (8:30 AM):</b> {morning_regime} (Score: {morning_score:.1f})\n"
 
-        score_change = current_score - morning_score
+        score_change = analysis['score'] - morning_score
         if abs(score_change) >= 2:
             change_emoji = "📈" if score_change > 0 else "📉"
             result += f"{change_emoji} <b>Score moved {score_change:+.1f} points since morning!</b>\n"
