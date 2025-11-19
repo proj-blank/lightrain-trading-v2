@@ -73,6 +73,37 @@ if not TRADING_ENABLED:
     send_telegram_message(message)
     sys.exit(0)
 
+# Check for KILL SWITCH halt flag
+halt_file = '/home/ubuntu/trading/data/trading_halted.flag'
+if os.path.exists(halt_file):
+    try:
+        with open(halt_file, 'r') as f:
+            halt_data = json.load(f)
+
+        halt_date = halt_data.get('date', '')
+        today_str = datetime.now().strftime('%Y-%m-%d')
+
+        if halt_date == today_str:
+            print(f"🚫 TRADING HALTED BY KILL SWITCH")
+            print(f"   Triggered: {halt_data.get('timestamp', 'Unknown')}")
+            print(f"   Reason: {halt_data.get('reason', 'Unknown')}")
+
+            send_telegram_message(
+                f"🚫 DAILY Trading Blocked\n\n"
+                f"Kill switch active since {halt_data.get('timestamp', 'Unknown')[:16]}\n"
+                f"Reason: {halt_data.get('reason', 'Kill switch')}\n\n"
+                f"Trading will resume tomorrow."
+            )
+            sys.exit(0)
+        else:
+            # Halt expired, remove file
+            os.remove(halt_file)
+            print(f"✅ Removed expired halt flag from {halt_date}")
+    except Exception as e:
+        print(f"⚠️ Error reading halt file: {e}")
+        # Continue trading on error to be safe
+        pass
+
 # Check global market regime
 import json
 
@@ -340,8 +371,19 @@ for sell in sell_signals:
 
             print(f"   🛑 SOLD {ticker} @ ₹{current_price:.2f} | P&L: ₹{pnl:,.0f}")
 
-            # Send Telegram alert
-            send_stop_loss_alert(ticker, entry_price, current_price, pnl, strategy=STRATEGY)
+            # Send Telegram alert (SELL signal, not stop loss)
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+            pnl_emoji = "🟢" if pnl > 0 else "🔴"
+            send_telegram_message(
+                f"{pnl_emoji} <b>STRATEGIC EXIT</b>\n\n"
+                f"📊 Ticker: {ticker} ({STRATEGY})\n"
+                f"📉 Reason: SELL signal (Score: {sell['score']:.1f})\n"
+                f"📥 Entry: ₹{entry_price:.2f}\n"
+                f"📤 Exit: ₹{current_price:.2f}\n"
+                f"💰 P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n"
+                f"📦 Qty: {qty}\n\n"
+                f"<i>Technical signals weakened, exited proactively</i>"
+            )
 
         except Exception as e:
             print(f"   ⚠️ Failed to close position {ticker}: {e}")

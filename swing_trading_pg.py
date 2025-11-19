@@ -768,6 +768,38 @@ def main():
     current_date = pd.Timestamp.now()
     log(f"📅 Trading date: {current_date.date()}")
 
+    # Check for KILL SWITCH halt flag
+    halt_file = '/home/ubuntu/trading/data/trading_halted.flag'
+    if os.path.exists(halt_file):
+        try:
+            import json
+            with open(halt_file, 'r') as f:
+                halt_data = json.load(f)
+
+            halt_date = halt_data.get('date', '')
+            today_str = current_date.strftime('%Y-%m-%d')
+
+            if halt_date == today_str:
+                log(f"🚫 TRADING HALTED BY KILL SWITCH")
+                log(f"   Triggered: {halt_data.get('timestamp', 'Unknown')}")
+                log(f"   Reason: {halt_data.get('reason', 'Unknown')}")
+
+                from scripts.telegram_bot import send_telegram_message
+                send_telegram_message(
+                    f"🚫 SWING Trading Blocked\n\n"
+                    f"Kill switch active since {halt_data.get('timestamp', 'Unknown')[:16]}\n"
+                    f"Reason: {halt_data.get('reason', 'Kill switch')}\n\n"
+                    f"Trading will resume tomorrow."
+                )
+                return
+            else:
+                # Halt expired, remove file
+                os.remove(halt_file)
+                log(f"✅ Removed expired halt flag from {halt_date}")
+        except Exception as e:
+            log(f"⚠️ Error reading halt file: {e}")
+            # Continue trading on error to be safe
+
     # 🌍 Global Market Regime Check
     from global_market_filter import get_current_regime
     regime_data = get_current_regime()

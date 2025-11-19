@@ -27,42 +27,39 @@ class GlobalMarketFilter:
         self.allow_new_entries = True
 
     def fetch_us_markets(self):
-        """Fetch S&P 500 and Nasdaq overnight performance"""
+        """Fetch S&P Futures (live overnight sentiment) and fallback to cash"""
         try:
-            # S&P 500
-            spy = yf.Ticker("^GSPC")
-            spy_data = spy.history(period="5d")
+            # Try S&P Futures first (ES=F) - live 24hr trading
+            sp_futures = yf.Ticker("ES=F")
+            futures_data = sp_futures.history(period="5d")
 
-            if len(spy_data) >= 2:
-                spy_current = spy_data['Close'].iloc[-1]
-                spy_prev = spy_data['Close'].iloc[-2]
-                spy_change_pct = ((spy_current - spy_prev) / spy_prev) * 100
+            if len(futures_data) >= 2:
+                fut_current = futures_data['Close'].iloc[-1]
+                fut_prev = futures_data['Close'].iloc[-2]
+                fut_change_pct = ((fut_current - fut_prev) / fut_prev) * 100
 
-                # 20-day SMA for trend
-                spy_20d = spy.history(period="1mo")
-                spy_sma20 = spy_20d['Close'].rolling(20).mean().iloc[-1]
-                spy_trend = "ABOVE" if spy_current > spy_sma20 else "BELOW"
-
-                self.indicators['sp500'] = {
-                    'price': spy_current,
-                    'change_pct': spy_change_pct,
-                    'sma20': spy_sma20,
-                    'trend': spy_trend
+                self.indicators['sp_futures'] = {
+                    'price': fut_current,
+                    'change_pct': fut_change_pct,
+                    'source': 'FUTURES'
                 }
+                print(f"✅ S&P Futures: {fut_current:.2f} ({fut_change_pct:+.2f}%)")
+            else:
+                # Fallback to S&P 500 cash
+                spy = yf.Ticker("^GSPC")
+                spy_data = spy.history(period="5d")
 
-            # Nasdaq
-            nasdaq = yf.Ticker("^IXIC")
-            nasdaq_data = nasdaq.history(period="5d")
+                if len(spy_data) >= 2:
+                    spy_current = spy_data['Close'].iloc[-1]
+                    spy_prev = spy_data['Close'].iloc[-2]
+                    spy_change_pct = ((spy_current - spy_prev) / spy_prev) * 100
 
-            if len(nasdaq_data) >= 2:
-                nasdaq_current = nasdaq_data['Close'].iloc[-1]
-                nasdaq_prev = nasdaq_data['Close'].iloc[-2]
-                nasdaq_change_pct = ((nasdaq_current - nasdaq_prev) / nasdaq_prev) * 100
-
-                self.indicators['nasdaq'] = {
-                    'price': nasdaq_current,
-                    'change_pct': nasdaq_change_pct
-                }
+                    self.indicators['sp_futures'] = {
+                        'price': spy_current,
+                        'change_pct': spy_change_pct,
+                        'source': 'CASH (fallback)'
+                    }
+                    print(f"⚠️ S&P Cash (fallback): {spy_current:.2f} ({spy_change_pct:+.2f}%)")
 
             return True
 
@@ -100,34 +97,66 @@ class GlobalMarketFilter:
             print(f"⚠️ Error fetching VIX: {e}")
             return False
 
-    def fetch_india_vix(self):
-        """Fetch India VIX"""
+    def fetch_asian_markets(self):
+        """Fetch Nikkei and Hang Seng (live at 8:30 AM IST)"""
         try:
-            india_vix = yf.Ticker("^INDIAVIX")
-            vix_data = india_vix.history(period="5d")
+            # Nikkei 225
+            nikkei = yf.Ticker("^N225")
+            nikkei_data = nikkei.history(period="5d")
 
-            if not vix_data.empty:
-                india_vix_current = vix_data['Close'].iloc[-1]
+            if len(nikkei_data) >= 2:
+                nikkei_current = nikkei_data['Close'].iloc[-1]
+                nikkei_prev = nikkei_data['Close'].iloc[-2]
+                nikkei_change = ((nikkei_current - nikkei_prev) / nikkei_prev) * 100
 
-                # India VIX interpretation
-                if india_vix_current < 12:
-                    level = "LOW"
-                elif india_vix_current < 15:
-                    level = "NORMAL"
-                elif india_vix_current < 20:
-                    level = "ELEVATED"
-                else:
-                    level = "HIGH"
-
-                self.indicators['india_vix'] = {
-                    'value': india_vix_current,
-                    'level': level
+                self.indicators['nikkei'] = {
+                    'price': nikkei_current,
+                    'change_pct': nikkei_change
                 }
+                print(f"✅ Nikkei: {nikkei_current:.2f} ({nikkei_change:+.2f}%)")
+
+            # Hang Seng
+            hangseng = yf.Ticker("^HSI")
+            hs_data = hangseng.history(period="5d")
+
+            if len(hs_data) >= 2:
+                hs_current = hs_data['Close'].iloc[-1]
+                hs_prev = hs_data['Close'].iloc[-2]
+                hs_change = ((hs_current - hs_prev) / hs_prev) * 100
+
+                self.indicators['hang_seng'] = {
+                    'price': hs_current,
+                    'change_pct': hs_change
+                }
+                print(f"✅ Hang Seng: {hs_current:.2f} ({hs_change:+.2f}%)")
 
             return True
 
         except Exception as e:
-            print(f"⚠️ Error fetching India VIX: {e}")
+            print(f"⚠️ Error fetching Asian markets: {e}")
+            return False
+
+    def fetch_gold(self):
+        """Fetch Gold Futures (inverse risk indicator)"""
+        try:
+            gold = yf.Ticker("GC=F")
+            gold_data = gold.history(period="5d")
+
+            if len(gold_data) >= 2:
+                gold_current = gold_data['Close'].iloc[-1]
+                gold_prev = gold_data['Close'].iloc[-2]
+                gold_change = ((gold_current - gold_prev) / gold_prev) * 100
+
+                self.indicators['gold'] = {
+                    'price': gold_current,
+                    'change_pct': gold_change
+                }
+                print(f"✅ Gold: ${gold_current:.2f} ({gold_change:+.2f}%)")
+
+            return True
+
+        except Exception as e:
+            print(f"⚠️ Error fetching Gold: {e}")
             return False
 
     def fetch_nifty_futures(self):
@@ -162,89 +191,118 @@ class GlobalMarketFilter:
 
     def analyze_regime(self):
         """
-        Determine market regime based on all indicators
+        Determine market regime based on global indicators
 
-        Regimes:
-        - BULL: Strong positive momentum, low volatility
-        - NEUTRAL: Mixed signals, moderate volatility
-        - CAUTION: Elevated volatility, mixed trend
-        - BEAR: Negative momentum, high volatility
+        New Weighting System (approved Nov 19, 2024):
+        - S&P Futures: 35%
+        - Nikkei: 25%
+        - Hang Seng: 20%
+        - Gold (inverse): 10%
+        - VIX: 10%
+
+        Score Thresholds:
+        ≥ 4:  BULL (100% sizing)
+        1-4:  NEUTRAL (75% sizing)
+        -2-1: CAUTION (50% sizing)
+        ≤-3:  BEAR (HALT - 0% sizing)
         """
 
-        # Scoring system
         score = 0
         signals = []
 
-        # 1. US Markets (40% weight)
-        if 'sp500' in self.indicators:
-            sp500 = self.indicators['sp500']
+        # 1. S&P Futures (35% weight) - Live overnight sentiment
+        if 'sp_futures' in self.indicators:
+            sp = self.indicators['sp_futures']
+            change = sp['change_pct']
+            source = sp['source']
 
-            # Overnight change
-            if sp500['change_pct'] > 1:
+            if change > 1:
                 score += 2
-                signals.append("✅ S&P 500 strong (+)")
-            elif sp500['change_pct'] > 0:
+                signals.append(f"✅ S&P {source}: {change:+.2f}% [+2pts, 35%wt]")
+            elif change > 0:
                 score += 1
-                signals.append("🟢 S&P 500 positive")
-            elif sp500['change_pct'] > -1:
+                signals.append(f"🟢 S&P {source}: {change:+.2f}% [+1pt, 35%wt]")
+            elif change > -1:
                 score -= 1
-                signals.append("🟡 S&P 500 slightly negative")
+                signals.append(f"🟡 S&P {source}: {change:+.2f}% [-1pt, 35%wt]")
             else:
                 score -= 2
-                signals.append("🔴 S&P 500 weak (-)")
+                signals.append(f"🔴 S&P {source}: {change:+.2f}% [-2pts, 35%wt]")
 
-            # Trend vs SMA20
-            if sp500['trend'] == "ABOVE":
+        # 2. Nikkei (25% weight) - Asian sentiment
+        if 'nikkei' in self.indicators:
+            nikkei = self.indicators['nikkei']
+            change = nikkei['change_pct']
+
+            if change > 1:
+                score += 2
+                signals.append(f"✅ Nikkei: {change:+.2f}% [+2pts, 25%wt]")
+            elif change > 0:
                 score += 1
-                signals.append("✅ S&P 500 above 20-SMA")
-            else:
+                signals.append(f"🟢 Nikkei: {change:+.2f}% [+1pt, 25%wt]")
+            elif change > -1:
                 score -= 1
-                signals.append("⚠️ S&P 500 below 20-SMA")
+                signals.append(f"🟡 Nikkei: {change:+.2f}% [-1pt, 25%wt]")
+            else:
+                score -= 2
+                signals.append(f"🔴 Nikkei: {change:+.2f}% [-2pts, 25%wt]")
 
-        # 2. VIX (30% weight)
+        # 3. Hang Seng (20% weight) - Asian sentiment
+        if 'hang_seng' in self.indicators:
+            hs = self.indicators['hang_seng']
+            change = hs['change_pct']
+
+            if change > 1:
+                score += 1.5
+                signals.append(f"✅ Hang Seng: {change:+.2f}% [+1.5pts, 20%wt]")
+            elif change > 0:
+                score += 1
+                signals.append(f"🟢 Hang Seng: {change:+.2f}% [+1pt, 20%wt]")
+            elif change > -1:
+                score -= 1
+                signals.append(f"🟡 Hang Seng: {change:+.2f}% [-1pt, 20%wt]")
+            else:
+                score -= 1.5
+                signals.append(f"🔴 Hang Seng: {change:+.2f}% [-1.5pts, 20%wt]")
+
+        # 4. Gold (10% weight) - INVERSE correlation
+        if 'gold' in self.indicators:
+            gold = self.indicators['gold']
+            change = gold['change_pct']
+
+            if change > 1.5:
+                score -= 2
+                signals.append(f"🔴 Gold: {change:+.2f}% (RISK-OFF) [-2pts, 10%wt]")
+            elif change > 0.5:
+                score -= 1
+                signals.append(f"🟡 Gold: {change:+.2f}% (Risk-off) [-1pt, 10%wt]")
+            elif change < -1.5:
+                score += 2
+                signals.append(f"✅ Gold: {change:+.2f}% (RISK-ON) [+2pts, 10%wt]")
+            elif change < -0.5:
+                score += 1
+                signals.append(f"🟢 Gold: {change:+.2f}% (Risk-on) [+1pt, 10%wt]")
+            else:
+                signals.append(f"⚪ Gold: {change:+.2f}% (Neutral) [0pts, 10%wt]")
+
+        # 5. VIX (10% weight) - Fear gauge
         if 'vix' in self.indicators:
             vix = self.indicators['vix']
+            level = vix['level']
+            value = vix['value']
 
-            if vix['level'] == "LOW":
+            if level == "LOW":
                 score += 2
-                signals.append("✅ VIX low (calm market)")
-            elif vix['level'] == "NORMAL":
+                signals.append(f"✅ VIX: {value:.1f} (LOW) [+2pts, 10%wt]")
+            elif level == "NORMAL":
                 score += 1
-                signals.append("🟢 VIX normal")
-            elif vix['level'] == "ELEVATED":
+                signals.append(f"🟢 VIX: {value:.1f} (NORMAL) [+1pt, 10%wt]")
+            elif level == "ELEVATED":
                 score -= 1
-                signals.append("⚠️ VIX elevated (caution)")
+                signals.append(f"🟡 VIX: {value:.1f} (ELEVATED) [-1pt, 10%wt]")
             else:  # HIGH
                 score -= 3
-                signals.append("🔴 VIX high (fear)")
-
-        # 3. India VIX (20% weight)
-        if 'india_vix' in self.indicators:
-            india_vix = self.indicators['india_vix']
-
-            if india_vix['level'] == "LOW":
-                score += 1
-                signals.append("✅ India VIX low")
-            elif india_vix['level'] == "NORMAL":
-                score += 0.5
-                signals.append("🟢 India VIX normal")
-            elif india_vix['level'] == "ELEVATED":
-                score -= 1
-                signals.append("⚠️ India VIX elevated")
-            else:
-                score -= 2
-                signals.append("🔴 India VIX high")
-
-        # 4. Nifty Trend (10% weight)
-        if 'nifty' in self.indicators:
-            nifty = self.indicators['nifty']
-
-            if nifty['trend'] == "ABOVE":
-                score += 1
-                signals.append("✅ Nifty above 50-SMA")
-            else:
-                score -= 1
-                signals.append("⚠️ Nifty below 50-SMA")
+                signals.append(f"🔴 VIX: {value:.1f} (HIGH FEAR) [-3pts, 10%wt]")
 
         # Determine regime based on score
         if score >= 4:
@@ -258,8 +316,8 @@ class GlobalMarketFilter:
         elif score >= -2:
             self.regime = "CAUTION"
             self.position_sizing_multiplier = 0.5
-            self.allow_new_entries = True  # But reduced size
-        else:
+            self.allow_new_entries = True
+        else:  # score <= -3 (NEW STRICT THRESHOLD)
             self.regime = "BEAR"
             self.position_sizing_multiplier = 0.0
             self.allow_new_entries = False
@@ -377,12 +435,12 @@ Score: {analysis['score']}
         print(f"📅 {datetime.now().strftime('%d %b %Y, %H:%M:%S IST')}")
         print("=" * 70)
 
-        # Fetch all indicators
+        # Fetch all indicators (NEW SYSTEM - Nov 19, 2024)
         print("\n📥 Fetching market data...")
-        self.fetch_us_markets()
-        self.fetch_vix()
-        self.fetch_india_vix()
-        self.fetch_nifty_futures()
+        self.fetch_us_markets()         # S&P Futures (or cash fallback)
+        self.fetch_asian_markets()      # Nikkei + Hang Seng
+        self.fetch_gold()                # Gold futures (inverse)
+        self.fetch_vix()                 # VIX fear gauge
 
         # Analyze regime
         print("\n🔍 Analyzing market regime...")

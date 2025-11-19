@@ -162,6 +162,7 @@ def handle_help():
 <b>Circuit Breaker Control:</b>
 /hold TICKER - Continue holding despite alert
 /exit TICKER - Force exit position now
+/exitall - 🚨 KILL SWITCH: Exit ALL & halt trading today
 /smart-stop TICKER - Use smart stops (ATR/Chandelier)
 """
 
@@ -417,145 +418,183 @@ def handle_pnl():
         return f"❌ Error: {e}\n{traceback.format_exc()[:300]}"
 
 def handle_gc():
-    """Global Check - Enhanced multi-index intraday regime tracker"""
+    """Global Check - LIVE global regime with real-time scoring (Nov 19, 2024)"""
     try:
         import json
 
-        result = "<b>🌍 Global Market Check</b>\n"
+        result = "<b>🌍 GLOBAL CHECK (LIVE)</b>\n"
         result += f"⏰ {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S IST')}\n\n"
 
-        # Read pre-market regime file
+        # Read morning regime (8:30 AM baseline)
         regime_file = '/home/ubuntu/trading/data/market_regime.json'
-        if not os.path.exists(regime_file):
-            return "❌ Regime data not found. Run global check at 8:30 AM first."
+        morning_regime = "UNKNOWN"
+        morning_score = 0
 
-        with open(regime_file, 'r') as f:
-            regime_data = json.load(f)
+        if os.path.exists(regime_file):
+            with open(regime_file, 'r') as f:
+                regime_data = json.load(f)
+            morning_regime = regime_data.get('regime', 'UNKNOWN')
+            morning_score = regime_data.get('score', 0)
 
-        # Pre-market regime (from 8:30 AM)
-        regime = regime_data.get('regime', 'UNKNOWN')
-        score = regime_data.get('score', 0)
-        allow_entries = regime_data.get('allow_new_entries', True)
-        timestamp = regime_data.get('timestamp', 'Unknown')
+        # Fetch LIVE global data
+        result += "<b>━━━ LIVE GLOBAL MARKETS ━━━</b>\n"
+        current_score = 0
 
-        regime_emoji = "🟢" if regime == "BULL" else "🔴" if regime == "BEAR" else "🟡"
-        entry_emoji = "✅" if allow_entries else "🚫"
+        # 1. S&P Futures (LIVE)
+        try:
+            sp_fut = yf.Ticker('ES=F').history(period='2d')
+            if len(sp_fut) >= 2:
+                sp_change = ((sp_fut['Close'].iloc[-1] / sp_fut['Close'].iloc[-2]) - 1) * 100
+                sp_emoji = "🟢" if sp_change >= 0 else "🔴"
 
-        result += f"<b>Pre-Market Regime (8:30 AM):</b>\n"
-        result += f"  {regime_emoji} {regime} (Score: {score:.1f})\n"
-        result += f"  {entry_emoji} New Entries: {'ALLOWED' if allow_entries else 'BLOCKED'}\n\n"
+                # Score calculation (35% weight)
+                if sp_change > 1:
+                    sp_pts = 2
+                elif sp_change > 0:
+                    sp_pts = 1
+                elif sp_change > -1:
+                    sp_pts = -1
+                else:
+                    sp_pts = -2
+                current_score += sp_pts
 
-        # Overnight US/Asia indicators
-        result += "<b>Overnight Markets:</b>\n"
-        indicators = regime_data.get('indicators', {})
-        sp500 = indicators.get('sp500', {})
-        nasdaq = indicators.get('nasdaq', {})
-        vix = indicators.get('vix', {})
+                result += f"{sp_emoji} S&P Futures: {sp_change:+.2f}% [{sp_pts:+d}pts]\n"
+        except:
+            result += f"⚠️ S&P Futures: Unavailable\n"
 
-        sp500_chg = sp500.get('change_pct', 0)
-        nasdaq_chg = nasdaq.get('change_pct', 0)
-        vix_val = vix.get('value', 0)
-        vix_level = vix.get('level', 'NORMAL')
+        # 2. Nikkei (LIVE)
+        try:
+            nikkei = yf.Ticker('^N225').history(period='2d')
+            if len(nikkei) >= 2:
+                nikkei_change = ((nikkei['Close'].iloc[-1] / nikkei['Close'].iloc[-2]) - 1) * 100
+                nikkei_emoji = "🟢" if nikkei_change >= 0 else "🔴"
 
-        sp500_emoji = "🟢" if sp500_chg >= 0 else "🔴"
-        nasdaq_emoji = "🟢" if nasdaq_chg >= 0 else "🔴"
-        vix_emoji = "🟢" if vix_val < 20 else "🟡" if vix_val < 30 else "🔴"
+                # Score calculation (25% weight)
+                if nikkei_change > 1:
+                    nikkei_pts = 2
+                elif nikkei_change > 0:
+                    nikkei_pts = 1
+                elif nikkei_change > -1:
+                    nikkei_pts = -1
+                else:
+                    nikkei_pts = -2
+                current_score += nikkei_pts
 
-        result += f"  {sp500_emoji} S&P 500: {sp500_chg:+.2f}%\n"
-        result += f"  {nasdaq_emoji} Nasdaq: {nasdaq_chg:+.2f}%\n"
-        result += f"  {vix_emoji} US VIX: {vix_val:.1f} ({vix_level})\n\n"
+                result += f"{nikkei_emoji} Nikkei: {nikkei_change:+.2f}% [{nikkei_pts:+d}pts]\n"
+        except:
+            result += f"⚠️ Nikkei: Unavailable\n"
 
-        # Get live India VIX and all 3 indices
-        result += "<b>Current Indian Market (Live):</b>\n"
+        # 3. Hang Seng (LIVE)
+        try:
+            hs = yf.Ticker('^HSI').history(period='2d')
+            if len(hs) >= 2:
+                hs_change = ((hs['Close'].iloc[-1] / hs['Close'].iloc[-2]) - 1) * 100
+                hs_emoji = "🟢" if hs_change >= 0 else "🔴"
 
-        green_count = 0
-        total_indices = 0
+                # Score calculation (20% weight)
+                if hs_change > 1:
+                    hs_pts = 1.5
+                elif hs_change > 0:
+                    hs_pts = 1
+                elif hs_change > -1:
+                    hs_pts = -1
+                else:
+                    hs_pts = -1.5
+                current_score += hs_pts
 
-        if ANGELONE_AVAILABLE:
-            try:
-                session = get_angel_session()
-                if session:
-                    # India VIX (Fear Gauge)
-                    try:
-                        vix_data = session.ltpData('NSE', 'INDIA VIX', '99926017')
-                        if vix_data and vix_data.get('status'):
-                            vix_ltp = float(vix_data['data'].get('ltp', 0))
-                            vix_emoji = "🟢" if vix_ltp < 15 else "🟡" if vix_ltp < 20 else "🔴"
-                            vix_level = "LOW" if vix_ltp < 15 else "MODERATE" if vix_ltp < 20 else "HIGH"
-                            result += f"  {vix_emoji} India VIX: {vix_ltp:.2f} ({vix_level} FEAR)\n\n"
-                    except:
-                        pass
+                result += f"{hs_emoji} Hang Seng: {hs_change:+.2f}% [{hs_pts:+.1f}pts]\n"
+        except:
+            result += f"⚠️ Hang Seng: Unavailable\n"
 
-                    # Multi-index tracking
-                    indices = [
-                        ('NIFTY 50', '99926000', 'Large-cap'),
-                        ('Nifty Midcap 150', '99926009', 'Mid-cap'),
-                        ('Nifty Smallcap 250', '99926013', 'Small-cap')
-                    ]
+        # 4. Gold (LIVE - INVERSE)
+        try:
+            gold = yf.Ticker('GC=F').history(period='2d')
+            if len(gold) >= 2:
+                gold_change = ((gold['Close'].iloc[-1] / gold['Close'].iloc[-2]) - 1) * 100
 
-                    for idx_name, token, category in indices:
-                        try:
-                            ltp_data = session.ltpData('NSE', idx_name, token)
-                            if ltp_data and ltp_data.get('status'):
-                                data = ltp_data['data']
-                                ltp = float(data.get('ltp', 0))
-                                open_price = float(data.get('open', 0))
+                # Inverse scoring (10% weight)
+                if gold_change > 1.5:
+                    gold_pts = -2
+                    gold_signal = "RISK-OFF"
+                elif gold_change > 0.5:
+                    gold_pts = -1
+                    gold_signal = "Risk-off"
+                elif gold_change < -1.5:
+                    gold_pts = 2
+                    gold_signal = "RISK-ON"
+                elif gold_change < -0.5:
+                    gold_pts = 1
+                    gold_signal = "Risk-on"
+                else:
+                    gold_pts = 0
+                    gold_signal = "Neutral"
+                current_score += gold_pts
 
-                                if open_price > 0:
-                                    change_pct = ((ltp - open_price) / open_price) * 100
-                                    change_emoji = "🟢" if change_pct >= 0 else "🔴"
+                gold_emoji = "🟢" if gold_pts > 0 else "🔴" if gold_pts < 0 else "⚪"
+                result += f"{gold_emoji} Gold: {gold_change:+.2f}% ({gold_signal}) [{gold_pts:+d}pts]\n"
+        except:
+            result += f"⚠️ Gold: Unavailable\n"
 
-                                    result += f"  <b>{category}:</b>\n"
-                                    result += f"    {change_emoji} {ltp:.2f} ({change_pct:+.2f}% today)\n"
+        # 5. VIX (LIVE)
+        try:
+            vix = yf.Ticker('^VIX').history(period='1d')
+            if not vix.empty:
+                vix_val = vix['Close'].iloc[-1]
 
-                                    total_indices += 1
-                                    if change_pct >= 0:
-                                        green_count += 1
-                        except Exception as e:
-                            result += f"  ⚠️ {category}: Data unavailable\n"
+                # Score calculation (10% weight)
+                if vix_val < 15:
+                    vix_pts = 2
+                    vix_level = "LOW"
+                elif vix_val < 20:
+                    vix_pts = 1
+                    vix_level = "NORMAL"
+                elif vix_val < 30:
+                    vix_pts = -1
+                    vix_level = "ELEVATED"
+                else:
+                    vix_pts = -3
+                    vix_level = "HIGH"
+                current_score += vix_pts
 
-                    # Market Breadth
-                    result += f"\n<b>Market Breadth:</b> {green_count}/{total_indices} GREEN"
+                vix_emoji = "🟢" if vix_val < 20 else "🟡" if vix_val < 30 else "🔴"
+                result += f"{vix_emoji} VIX: {vix_val:.1f} ({vix_level}) [{vix_pts:+d}pts]\n"
+        except:
+            result += f"⚠️ VIX: Unavailable\n"
 
-                    breadth_pct = (green_count / total_indices * 100) if total_indices > 0 else 0
-                    if breadth_pct >= 67:
-                        result += " 🟢\n"
-                    elif breadth_pct >= 33:
-                        result += " 🟡\n"
-                    else:
-                        result += " 🔴\n"
-
-                    # Intraday Verdict
-                    result += "\n<b>Intraday Verdict:</b>\n"
-
-                    if breadth_pct >= 67:
-                        verdict = "🟢 RISK-ON"
-                        if regime == "BEAR":
-                            result += f"  {verdict}\n"
-                            result += f"  💡 <i>Strong intraday action overriding morning BEAR signal</i>\n"
-                        else:
-                            result += f"  {verdict}\n"
-                            result += f"  💡 <i>Aligned with morning {regime} signal</i>\n"
-                    elif breadth_pct >= 33:
-                        verdict = "🟡 NEUTRAL"
-                        result += f"  {verdict}\n"
-                        result += f"  💡 <i>Mixed signals - be selective</i>\n"
-                    else:
-                        verdict = "🔴 RISK-OFF"
-                        result += f"  {verdict}\n"
-                        result += f"  💡 <i>Weak market - avoid new entries</i>\n"
-
-            except Exception as e:
-                result += f"  ⚠️ Live data error: {e}\n"
+        # Calculate current regime
+        if current_score >= 4:
+            current_regime = "BULL"
+            current_sizing = "100%"
+        elif current_score >= 1:
+            current_regime = "NEUTRAL"
+            current_sizing = "75%"
+        elif current_score >= -2:
+            current_regime = "CAUTION"
+            current_sizing = "50%"
         else:
-            result += "  ⚠️ AngelOne not available\n"
+            current_regime = "BEAR"
+            current_sizing = "0% (HALT)"
 
-        result += f"\n<i>Pre-market updated at {timestamp[:16]}</i>"
+        regime_emoji = "🟢" if current_regime == "BULL" else "🟡" if current_regime in ["NEUTRAL", "CAUTION"] else "🔴"
+
+        result += f"\n<b>━━━ REGIME ANALYSIS ━━━</b>\n"
+        result += f"<b>Total Score:</b> {current_score:.1f}\n"
+        result += f"<b>Current Regime:</b> {regime_emoji} {current_regime}\n"
+        result += f"<b>Position Sizing:</b> {current_sizing}\n\n"
+
+        # Comparison with morning
+        result += f"<b>Baseline (8:30 AM):</b> {morning_regime} (Score: {morning_score:.1f})\n"
+
+        score_change = current_score - morning_score
+        if abs(score_change) >= 2:
+            change_emoji = "📈" if score_change > 0 else "📉"
+            result += f"{change_emoji} <b>Score moved {score_change:+.1f} points since morning!</b>\n"
 
         return result
+
     except Exception as e:
         import traceback
-        return f"❌ Error: {e}\n{traceback.format_exc()[:300]}"
+        return f"❌ Error: {str(e)}\n{traceback.format_exc()[:300]}"
 
 def handle_hold(ticker):
     """Mark position to hold (suppress alerts, wait for hard stop)"""
@@ -646,6 +685,99 @@ Position closed per your command."""
     except Exception as e:
         return f"❌ Error exiting position: {e}"
 
+def handle_exitall():
+    """KILL SWITCH - Exit all positions and halt trading for the day"""
+    try:
+        import json
+        from datetime import date
+
+        result = "<b>🚨 KILL SWITCH ACTIVATED</b>\n\n"
+
+        # Get all active positions (DAILY + SWING)
+        positions = get_active_positions()
+
+        if not positions:
+            result += "ℹ️ No active positions to exit.\n\n"
+        else:
+            result += f"<b>Exiting {len(positions)} positions...</b>\n\n"
+
+            total_pnl = 0
+            exit_count = 0
+
+            for position in positions:
+                ticker = position['ticker']
+                entry_price = float(position['entry_price'])
+                qty = int(position['quantity'])
+                strategy = position['strategy']
+
+                try:
+                    # Get current price
+                    current_price = entry_price
+                    if YFINANCE_AVAILABLE:
+                        try:
+                            stock = yf.Ticker(ticker)
+                            hist = stock.history(period='1d')
+                            if not hist.empty:
+                                current_price = float(hist['Close'].iloc[-1])
+                        except:
+                            pass
+
+                    # Calculate P&L
+                    pnl = (current_price - entry_price) * qty
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    total_pnl += pnl
+
+                    # Close position
+                    close_position(ticker, strategy, current_price, pnl)
+                    update_capital(strategy, pnl)
+
+                    # Log trade
+                    log_trade(
+                        ticker=ticker,
+                        strategy=strategy,
+                        signal='SELL',
+                        price=current_price,
+                        quantity=qty,
+                        pnl=pnl,
+                        notes='KILL-SWITCH-EXITALL via Telegram'
+                    )
+
+                    # Add to result
+                    pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                    result += f"{pnl_emoji} {ticker} ({strategy}): ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n"
+                    exit_count += 1
+
+                except Exception as e:
+                    result += f"⚠️ {ticker}: Failed - {str(e)[:50]}\n"
+
+            pnl_emoji = "🟢" if total_pnl > 0 else "🔴" if total_pnl < 0 else "⚪"
+            result += f"\n<b>Total P&L:</b> {pnl_emoji} ₹{total_pnl:,.0f}\n"
+            result += f"<b>Exited:</b> {exit_count}/{len(positions)} positions\n\n"
+
+        # Create HALT flag file (blocks trading for rest of day)
+        halt_file = '/home/ubuntu/trading/data/trading_halted.flag'
+        halt_data = {
+            'date': str(date.today()),
+            'timestamp': datetime.now().isoformat(),
+            'reason': 'KILL-SWITCH-EXITALL command',
+            'triggered_by': 'Telegram'
+        }
+
+        os.makedirs(os.path.dirname(halt_file), exist_ok=True)
+        with open(halt_file, 'w') as f:
+            json.dump(halt_data, f, indent=2)
+
+        result += "🛑 <b>TRADING HALTED FOR TODAY</b>\n"
+        result += "✅ No new positions will be opened\n"
+        result += f"📅 Halt expires: {date.today()} EOD\n\n"
+        result += "<i>Trading will auto-resume tomorrow at 9:15 AM</i>"
+
+        return result
+
+    except Exception as e:
+        import traceback
+        return f"❌ Kill switch error: {str(e)}\n{traceback.format_exc()[:200]}"
+
 def handle_smart_stop(ticker):
     """Enable smart-stop mode (use ATR/Chandelier stops instead of circuit breaker)"""
     try:
@@ -696,6 +828,10 @@ def process_command(text):
         return handle_positions('SWING')
     elif cmd == '/cap':
         return handle_capital()
+
+    # KILL SWITCH - Exit all positions and halt trading
+    elif cmd == '/exitall':
+        return handle_exitall()
 
     # Commands with ticker argument
     elif cmd == '/hold' and len(parts) == 2:
