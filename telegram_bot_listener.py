@@ -501,6 +501,42 @@ def handle_gc():
             change_emoji = "📈" if score_change > 0 else "📉"
             result += f"{change_emoji} <b>Score moved {score_change:+.1f} points since morning!</b>\n"
 
+        # Add Indian market indices (intraday performance)
+        if ANGELONE_AVAILABLE:
+            try:
+                result += f"\n<b>━━━ INDIA MARKETS (LIVE) ━━━</b>\n"
+
+                benchmarks = {
+                    'Nifty 50 (Large)': ('99926000', 'NIFTY 50'),
+                    'Nifty Mid 150': ('99926023', 'NIFTY MIDCAP 150'),
+                    'Nifty Small 250': ('99926037', 'NIFTY SMLCAP 250')
+                }
+
+                session = get_angel_session()
+                if session:
+                    for display_name, (token, symbol_name) in benchmarks.items():
+                        try:
+                            ltp_data = session.ltpData('NSE', symbol_name, token)
+                            if ltp_data and ltp_data.get('status'):
+                                data = ltp_data.get('data', {})
+                                ltp = float(data.get('ltp', 0))
+                                open_price = float(data.get('open', 0))
+                                if open_price > 0:
+                                    change_pct = ((ltp - open_price) / open_price) * 100
+                                    emoji = "🟢" if change_pct >= 0 else "🔴"
+                                    result += f"{emoji} {display_name}: {change_pct:+.2f}%\n"
+                        except Exception as e:
+                            print(f"Failed to fetch {display_name}: {e}")
+                            continue
+
+                    result += "<i>Live intraday data from NSE</i>\n"
+                else:
+                    result += "<i>Market data temporarily unavailable</i>\n"
+
+            except Exception as e:
+                print(f"India indices fetch error: {e}")
+                pass
+
         return result
 
     except Exception as e:
