@@ -71,6 +71,71 @@ Capital tracker summary:
 - Net P&L
 - Category allocation breakdown
 
+#### /gc
+**Global Check** - Live global market regime analysis (refactored 2024-11-19)
+
+**Purpose**: Real-time intraday monitoring of global market conditions
+
+**What It Shows**:
+1. **Live Global Markets** (via yfinance):
+   - S&P 500 Futures (ES=F) - Price & daily change
+   - Nikkei 225 (^N225) - Price & daily change
+   - Hang Seng (^HSI) - Price & daily change
+   - Gold Futures (GC=F) - Price & daily change (inverse indicator)
+   - VIX (^VIX) - Volatility level and classification
+
+2. **Regime Analysis**:
+   - Current regime score (-10 to +10)
+   - Regime classification (BULL/NEUTRAL/CAUTION/BEAR)
+   - Position sizing recommendation
+   - Comparison with morning 8:30 AM baseline
+
+3. **India Markets** (live via AngelOne API):
+   - Nifty 50 (Large-cap) - Intraday performance
+   - Nifty Mid 150 (Mid-cap) - Intraday performance
+   - Nifty Small 250 (Small-cap) - Intraday performance
+
+**Key Features** (since Nov 19 refactor):
+- Uses `GlobalMarketFilter` class (single source of truth)
+- Same scoring logic as morning 8:30 AM check
+- Does NOT save to database (live query only)
+- Reduced from 177 lines to 85 lines
+- Added India market indices for intraday context
+
+**Example Response**:
+```
+🌍 GLOBAL CHECK (LIVE)
+⏰ 14:30:25 IST
+
+━━━ LIVE GLOBAL MARKETS ━━━
+S&P Futures: 5,985.50 (+0.65%) [+1pts]
+Nikkei: 38,250.00 (+1.20%) [+2pts]
+Hang Seng: 19,850.00 (+0.80%) [+1pts]
+Gold: 2,025.50 (-0.40%) [+1pts]
+VIX: 14.5 (LOW) [+2pts]
+
+━━━ REGIME ANALYSIS ━━━
+Total Score: +7.0
+Current Regime: 🟢 BULL
+Position Sizing: 100%
+New Entries: ✅ ALLOWED
+
+Baseline (8:30 AM): NEUTRAL (Score: +2.5)
+
+━━━ INDIA MARKETS (LIVE) ━━━
+Nifty 50 (Large): 21,450.30 (+0.45%)
+Nifty Mid 150: 45,230.15 (+0.78%)
+Nifty Small 250: 13,850.60 (+1.02%)
+```
+
+**When to Use**:
+- Intraday check before entering new positions
+- After significant market moves during the day
+- To compare current conditions with morning baseline
+- To gauge India market strength across market caps
+
+**Note**: /gc is for live monitoring only. The 8:30 AM check saves to SQL database for historical tracking.
+
 ---
 
 ## Position Commands

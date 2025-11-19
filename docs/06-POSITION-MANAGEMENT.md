@@ -102,9 +102,10 @@ TP3 (+30%): Sell 42 shares @ ₹650 → Position closed
 1. **Stop Loss Hit**: Price drops below SL
 2. **Take Profit**: Any TP level reached
 3. **SELL Signal**: Technical indicators turn bearish
-4. **Time-based**: 
-   - Daily: Exit at 3:15 PM if SELL signal
-   - Swing: Exit after 20 trading days (max hold period)
+4. **MAX-HOLD Exit**: Time-based forced exits to free capital
+   - Daily: 3 calendar days (warning at 2 PM on day 2, exit at 9 AM on day 3)
+   - Swing: 10 calendar days (warning at 2 PM on day 9, exit at 9 AM on day 10)
+5. **Time-based (DAILY only)**: Exit at 3:15 PM if SELL signal
 
 ### Manual Exits (Telegram)
 - `/exit TICKER`: Force exit immediately
@@ -189,6 +190,95 @@ CREATE TABLE circuit_breaker_holds (
     reason TEXT
 );
 ```
+
+---
+
+## MAX-HOLD Warning System
+
+### Purpose
+Prevent capital from being locked in "dead meat" positions. Force exits after holding period to free capital for new opportunities.
+
+### Hold Limits
+- **DAILY Strategy**: 3 calendar days maximum
+- **SWING Strategy**: 10 calendar days maximum
+
+### Warning Timeline
+
+#### Day Before Exit (2:00 PM IST)
+At 2:00 PM on the day before forced exit, you receive a comprehensive alert:
+
+**Alert Contents:**
+1. **Position Details**: Ticker, strategy, entry price, quantity
+2. **Performance**: Current P&L and percentage return
+3. **Technical Analysis**: Current price, SMA(20), RSI
+4. **AI Analysis**:
+   - Recommendation (HOLD/EXIT)
+   - Confidence level
+   - Reasoning based on news + technicals
+   - Recent news headlines (up to 3)
+
+**Your Options:**
+- **Manual Exit Today**: Exit before 3:30 PM market close
+- **Let Auto-Exit**: Do nothing, position exits tomorrow at 9:00 AM
+
+#### Exit Day (9:00 AM IST)
+If you didn't exit manually, the position automatically exits at market open:
+- Exit price: Market price at 9:00 AM
+- Capital freed: Original investment + P&L returned to available capital
+- New opportunities: Capital available for fresh entries
+
+### Alert Example
+```
+🔔 MAX-HOLD WARNING + AI ANALYSIS
+
+📊 Ticker: RELIANCE (DAILY)
+📅 Held: 2 days (max: 3)
+💰 Current P&L: 🟢 ₹4,200 (+2.80%)
+
+Entry: ₹500.00 | Current: ₹514.00
+Quantity: 300
+
+━━━ TECHNICAL ━━━
+Current: ₹514.00 | SMA(20): ₹508.50 | RSI: 58.5 | P&L: +2.80%
+
+━━━ AI ANALYSIS ━━━
+Recommendation: HOLD FOR RECOVERY
+Confidence: MEDIUM
+Reasoning: Recent correction on weak volume. Support at ₹510.
+Positive sector sentiment with upcoming results.
+
+📰 Recent News (2 articles):
+  1. Reliance announces Q4 earnings date
+  2. Oil prices stable, benefiting refining margins
+
+━━━━━━━━━━━━━━━━━━━
+
+⏰ Will auto-exit tomorrow at 9:00 AM
+
+Options:
+• Exit manually today before 3:30 PM close
+• Let auto-exit handle tomorrow morning
+• Type /exitall to exit all positions now
+
+You have 30 minutes to decide before market close
+```
+
+### Database Tracking
+MAX-HOLD exits are logged in `trades` table with:
+- `exit_reason`: "MAX-HOLD"
+- `days_held`: Actual calendar days held
+- P&L and percentage return recorded
+
+### Configuration
+Located in strategy scripts:
+- `daily_trading_pg.py`: `MAX_HOLD_DAYS = 3`
+- `swing_trading_pg.py`: `MAX_HOLD_DAYS = 10`
+
+### Key Script
+- `check_max_hold_warnings.py`: Runs at 2:00 PM IST daily
+- Checks positions at warning threshold (day 2 for DAILY, day 9 for SWING)
+- Fetches AI analysis with news for each position
+- Sends Telegram alert with comprehensive details
 
 ---
 

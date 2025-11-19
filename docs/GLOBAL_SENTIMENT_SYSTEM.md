@@ -1,8 +1,12 @@
 # Global Market Sentiment System
 
+**Last Updated**: 2024-11-19 (Added actual implementation details)
+
 ## 🌍 Overview
 
 Solves the **overnight gap problem**: US/Asia markets move while India is closed, creating prediction opportunities.
+
+**Note**: This document covers both the conceptual framework AND the actual implemented regime-based system (`global_market_filter.py`)
 
 ---
 
@@ -320,3 +324,264 @@ While other traders react to the opening gap at 9:15 AM, you've already:
 - Prepared for gap-up or gap-down scenarios
 
 **First-mover advantage = Better entries = Higher returns**
+
+---
+
+## 🔧 ACTUAL IMPLEMENTED SYSTEM (GlobalMarketFilter)
+
+**File**: `global_market_filter.py`
+**Class**: `GlobalMarketFilter`
+**Last Updated**: 2024-11-19 (Refactored as single source of truth)
+
+### Architecture
+
+**Single Source of Truth Principle**:
+- ALL regime calculations use `GlobalMarketFilter` class
+- Morning 8:30 AM check: Saves to file + database
+- /gc Telegram command: Live query only (no save)
+- 2 PM regime check: Compares current vs morning baseline
+
+### Regime Scoring System
+
+**Indicators & Weights**:
+```python
+S&P 500 Futures (ES=F):  35% weight  (±2 points max)
+Nikkei 225 (^N225):      25% weight  (±2 points max)
+Hang Seng (^HSI):        20% weight  (±1.5 points max)
+Gold Futures (GC=F):     10% weight  (±2 points max, INVERSE)
+VIX (^VIX):              10% weight  (±3 points max)
+```
+
+**Regime Classifications**:
+```
+Score >= 4:  BULL      (Position sizing: 100%, New entries: YES)
+Score 1-4:   NEUTRAL   (Position sizing: 75%, New entries: YES)
+Score -2-1:  CAUTION   (Position sizing: 50%, New entries: YES)
+Score <= -3: BEAR      (Position sizing: 0%, New entries: HALT)
+```
+
+### Daily Workflow
+
+#### 8:30 AM IST - Morning Regime Check
+```bash
+cron: 0 3 * * 1-5  # 8:30 AM IST = 3:00 AM UTC
+script: run_market_check.sh → global_market_filter.py
+```
+
+**Actions**:
+1. Fetch all 5 indicators via yfinance
+2. Calculate regime score
+3. Determine regime (BULL/NEUTRAL/CAUTION/BEAR)
+4. **Save to file**: `/home/ubuntu/trading/data/market_regime.json`
+5. **Save to database**: `market_regime_history` table
+6. Send Telegram alert if regime changed
+
+**File Output** (`market_regime.json`):
+```json
+{
+  "regime": "BULL",
+  "score": 5.5,
+  "allow_new_entries": true,
+  "position_sizing_multiplier": 1.0,
+  "details": "S&P: +1.2%, Nikkei: +0.8%, Hang Seng: +0.5%, Gold: -0.3%, VIX: 14.2",
+  "timestamp": "2024-11-19 08:30:00"
+}
+```
+
+**Database Output** (`market_regime_history`):
+- Stores all indicator prices and changes
+- One record per day (UNIQUE constraint on check_date)
+- Used for historical analysis and backtesting
+
+#### 2:00 PM IST - Intraday Deterioration Check
+```bash
+cron: 30 8 * * 1-5  # 2:00 PM IST = 8:30 AM UTC
+script: regime_2pm_check.py
+```
+
+**Purpose**: Alert if regime deteriorates during the day
+
+**Actions**:
+1. Read morning regime from `market_regime.json`
+2. Calculate LIVE regime score (using GlobalMarketFilter)
+3. Compare: `score_change = current_score - morning_score`
+4. Alert if:
+   - Score drops ≥ 3 points: "SEVERE DETERIORATION"
+   - Score drops ≥ 2 points: "MODERATE DETERIORATION"
+   - Current regime is BEAR: "BEAR REGIME DETECTED"
+5. Recommend `/exitall` if severe
+
+#### Real-Time /gc Command
+```bash
+Telegram: /gc
+Handler: telegram_bot_listener.py → handle_gc()
+```
+
+**Actions**:
+1. Read morning baseline from `market_regime.json`
+2. Create `GlobalMarketFilter()` instance
+3. Fetch LIVE data for all 5 indicators
+4. Calculate LIVE regime score
+5. Fetch India indices via AngelOne API (NEW Nov 19):
+   - Nifty 50 (Large-cap)
+   - Nifty Mid 150 (Mid-cap)
+   - Nifty Small 250 (Small-cap)
+6. Format and send response
+7. **Does NOT save** to file or database
+
+**Why /gc doesn't save**:
+- Keep database clean (one record per day)
+- Live queries are for intraday monitoring only
+- Historical analysis should use 8:30 AM data
+
+### Database Integration (Nov 19, 2024)
+
+**New Columns Added** to `market_regime_history`:
+```sql
+-- Price & change columns for all indicators
+sp_futures_price NUMERIC(10, 2),
+sp_futures_change_pct NUMERIC(5, 2),
+nikkei_price NUMERIC(10, 2),
+nikkei_change_pct NUMERIC(5, 2),
+hang_seng_price NUMERIC(10, 2),
+hang_seng_change_pct NUMERIC(5, 2),
+gold_price NUMERIC(10, 2),
+gold_change_pct NUMERIC(5, 2),
+vix_value NUMERIC(5, 2)
+```
+
+**Implementation**:
+```python
+# global_market_filter.py
+class GlobalMarketFilter:
+    def save_to_database(self, analysis):
+        """Save regime check to SQL (8:30 AM only)"""
+        with get_db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO market_regime_history (
+                    check_date, regime, score,
+                    sp_futures_price, sp_futures_change_pct,
+                    ...
+                ) VALUES (%s, %s, %s, %s, %s, ...)
+                ON CONFLICT (check_date) DO UPDATE SET ...
+            """)
+```
+
+### Refactoring History (Nov 19, 2024)
+
+**Problem**: Duplicate scoring logic
+- `telegram_bot_listener.py` had 177 lines of duplicate scoring
+- Different results from morning check
+- Hard to maintain
+
+**Solution**: Single Source of Truth
+- All regime calculations → `GlobalMarketFilter` class
+- `/gc` handler reduced from 177 lines to 85 lines
+- Guaranteed consistency across all checks
+
+### India Market Indices (Nov 19, 2024)
+
+**Added to /gc command**:
+```python
+# Fetch live via AngelOne API
+benchmarks = {
+    'Nifty 50 (Large)': ('99926000', 'NIFTY 50'),
+    'Nifty Mid 150': ('99926023', 'NIFTY MIDCAP 150'),
+    'Nifty Small 250': ('99926037', 'NIFTY SMLCAP 250')
+}
+```
+
+**Purpose**:
+- Intraday context for position decisions
+- See if large/mid/small caps moving differently
+- Helps decide which category to focus on
+
+### Key Files
+
+**Core Implementation**:
+- `global_market_filter.py` - GlobalMarketFilter class (single source)
+- `run_market_check.sh` - 8:30 AM wrapper script
+- `regime_2pm_check.py` - Intraday deterioration check
+- `telegram_bot_listener.py` - /gc command handler
+
+**Data Files**:
+- `/home/ubuntu/trading/data/market_regime.json` - Current regime state
+- Database: `market_regime_history` table
+
+**Helper Scripts**:
+- `scripts/db_connection.py` - Database utilities
+- `scripts/telegram_bot.py` - Telegram messaging
+
+### Trading Integration
+
+**How strategies use regime**:
+```python
+# daily_trading_pg.py & swing_trading_pg.py
+import json
+
+# Read morning regime
+with open('/home/ubuntu/trading/data/market_regime.json', 'r') as f:
+    regime_data = json.load(f)
+
+if not regime_data['allow_new_entries']:
+    print("🚫 BEAR regime detected - HALTING new entries")
+    sys.exit(0)
+
+# Adjust position sizing
+multiplier = regime_data['position_sizing_multiplier']
+position_size = base_position_size * multiplier
+```
+
+### Best Practices
+
+**Do**:
+- ✅ Use /gc for intraday checks before new entries
+- ✅ Trust the morning 8:30 AM regime for the day
+- ✅ Exit positions if 2 PM check shows severe deterioration
+- ✅ Check VIX spikes (>25) for risk-off periods
+
+**Don't**:
+- ❌ Override BEAR regime (score ≤ -3) without strong reason
+- ❌ Enter new positions if regime deteriorated significantly
+- ❌ Ignore 2 PM alerts about regime changes
+- ❌ Manually edit market_regime.json file
+
+### Configuration
+
+**Adjust regime thresholds** (`global_market_filter.py`):
+```python
+def analyze_regime(self):
+    if self.score >= 4:
+        regime = "BULL"
+        sizing = 1.0
+    elif self.score >= 1:
+        regime = "NEUTRAL"
+        sizing = 0.75
+    # ... etc
+```
+
+**Adjust indicator weights**:
+```python
+# In scoring methods:
+if sp_change > 1:
+    sp_pts = 2  # Max 2 points for S&P
+elif sp_change > 0:
+    sp_pts = 1
+# ... etc
+```
+
+---
+
+## 📊 Summary: Conceptual vs Implemented
+
+| Feature | Conceptual (This Doc) | Implemented (Actual) |
+|---------|----------------------|---------------------|
+| Gap Prediction | ✓ Described | ✗ Not implemented |
+| SGX Nifty | ✓ Mentioned | ✗ Not used |
+| Regime Scoring | ✓ Described | ✓ **Fully implemented** |
+| Database Logging | ✓ Mentioned | ✓ **market_regime_history** |
+| /gc Command | - | ✓ **Live with India indices** |
+| 2 PM Check | - | ✓ **Deterioration alerts** |
+| Single Source | - | ✓ **GlobalMarketFilter class** |
+
+**Key Takeaway**: The actual system is a **regime-based approach** rather than gap prediction. Focus on regime scoring for position sizing decisions.

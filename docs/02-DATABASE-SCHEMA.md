@@ -1,6 +1,6 @@
 # LightRain Trading System - Database Schema
 
-**Last Updated**: 2024-11-13  
+**Last Updated**: 2024-11-19
 **Purpose**: PostgreSQL database tables, columns, relationships, and common queries
 
 ---
@@ -443,6 +443,137 @@ SELECT rs_rating FROM rs_cache
 WHERE ticker = 'RELIANCE.NS'
   AND last_updated > CURRENT_TIMESTAMP - INTERVAL '24 hours';
 ```
+
+---
+
+### 3.5 `market_regime_history` - Global Market Regime Tracking
+
+**Purpose**: Historical log of daily 8:30 AM global market regime checks with detailed indicator weights
+
+**Last Updated**: 2024-11-19 (Added indicator price/change columns)
+
+```sql
+CREATE TABLE market_regime_history (
+    id SERIAL PRIMARY KEY,
+    check_date DATE UNIQUE NOT NULL,
+    regime VARCHAR(20) NOT NULL,  -- 'BULL', 'NEUTRAL', 'CAUTION', 'BEAR'
+    score NUMERIC(5, 2) NOT NULL,
+    position_sizing_multiplier NUMERIC(3, 2),
+    allow_new_entries BOOLEAN DEFAULT TRUE,
+
+    -- S&P Futures (35% weight)
+    sp_futures_price NUMERIC(10, 2),
+    sp_futures_change_pct NUMERIC(5, 2),
+
+    -- Nikkei 225 (25% weight)
+    nikkei_price NUMERIC(10, 2),
+    nikkei_change_pct NUMERIC(5, 2),
+
+    -- Hang Seng (20% weight)
+    hang_seng_price NUMERIC(10, 2),
+    hang_seng_change_pct NUMERIC(5, 2),
+
+    -- Gold - inverse indicator (10% weight)
+    gold_price NUMERIC(10, 2),
+    gold_change_pct NUMERIC(5, 2),
+
+    -- VIX - volatility (10% weight)
+    vix_value NUMERIC(5, 2),
+
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_regime_date ON market_regime_history(check_date DESC);
+CREATE INDEX idx_regime_score ON market_regime_history(score DESC);
+```
+
+**Key Columns Explained**:
+- `regime`: Current market regime classification
+- `score`: Composite score from all indicators (-10 to +10 range)
+- `position_sizing_multiplier`: How much to scale position sizes (0.5 = 50%, 1.0 = 100%)
+- `allow_new_entries`: FALSE when regime is BEAR (score ≤ -3)
+- `sp_futures_price/change_pct`: S&P 500 futures closing price and daily change
+- `nikkei_price/change_pct`: Nikkei 225 closing price and daily change
+- `hang_seng_price/change_pct`: Hang Seng closing price and daily change
+- `gold_price/change_pct`: Gold futures closing price and daily change (inverse indicator)
+- `vix_value`: VIX closing value (volatility index)
+
+**Regime Scoring Thresholds**:
+```
+Score >= 4:  BULL      (Position sizing: 100%, New entries: Yes)
+Score 1-4:   NEUTRAL   (Position sizing: 75%, New entries: Yes)
+Score -2-1:  CAUTION   (Position sizing: 50%, New entries: Yes)
+Score <= -3: BEAR      (Position sizing: 0%, New entries: HALT)
+```
+
+**Weight Distribution**:
+- S&P Futures: 35% (±2 points max)
+- Nikkei 225: 25% (±2 points max)
+- Hang Seng: 20% (±1.5 points max)
+- Gold (inverse): 10% (±2 points max)
+- VIX: 10% (±3 points max)
+
+**Example Queries**:
+
+```sql
+-- Get last 7 days regime history
+SELECT check_date, regime, score,
+       sp_futures_change_pct, nikkei_change_pct,
+       hang_seng_change_pct, vix_value
+FROM market_regime_history
+WHERE check_date >= CURRENT_DATE - INTERVAL '7 days'
+ORDER BY check_date DESC;
+
+-- Track regime changes over time
+SELECT check_date, regime, score,
+       LAG(regime) OVER (ORDER BY check_date) as prev_regime,
+       LAG(score) OVER (ORDER BY check_date) as prev_score,
+       score - LAG(score) OVER (ORDER BY check_date) as score_change
+FROM market_regime_history
+WHERE check_date >= CURRENT_DATE - INTERVAL '30 days'
+ORDER BY check_date DESC;
+
+-- Get today's regime for trading decisions
+SELECT regime, score, allow_new_entries, position_sizing_multiplier
+FROM market_regime_history
+WHERE check_date = CURRENT_DATE;
+
+-- Count days in each regime (last 60 days)
+SELECT regime, COUNT(*) as days,
+       ROUND(AVG(score), 2) as avg_score
+FROM market_regime_history
+WHERE check_date >= CURRENT_DATE - INTERVAL '60 days'
+GROUP BY regime
+ORDER BY days DESC;
+
+-- Identify volatile periods (VIX > 25)
+SELECT check_date, regime, score, vix_value,
+       sp_futures_change_pct, nikkei_change_pct
+FROM market_regime_history
+WHERE vix_value > 25
+  AND check_date >= CURRENT_DATE - INTERVAL '90 days'
+ORDER BY vix_value DESC;
+
+-- Track indicator contributions
+SELECT check_date,
+       sp_futures_change_pct as sp_chg,
+       nikkei_change_pct as nikkei_chg,
+       hang_seng_change_pct as hs_chg,
+       gold_change_pct as gold_chg,
+       vix_value,
+       score
+FROM market_regime_history
+WHERE check_date >= CURRENT_DATE - INTERVAL '14 days'
+ORDER BY check_date DESC;
+```
+
+**Data Population**:
+- Populated by `global_market_filter.py` at 8:30 AM IST daily
+- Uses `save_to_database()` method in GlobalMarketFilter class
+- One record per day (enforced by UNIQUE constraint on check_date)
+- `/gc` Telegram command does NOT save to this table (live query only)
 
 ---
 
