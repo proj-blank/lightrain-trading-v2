@@ -150,27 +150,8 @@ def check_exits(portfolio, stock_data, current_date):
         days_held = (current_date - entry_date).days
         portfolio.at[idx, 'DaysHeld'] = days_held
 
-        # WARNING: Day before max hold - give user time to analyze
-        if days_held == MAX_HOLD_DAYS - 1:
-            if ticker in stock_data and len(stock_data[ticker]) > 0:
-                current_price = float(stock_data[ticker]['Close'].iloc[-1])
-                pnl = (current_price - entry_price) * qty
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100
-
-                log(f"⚠️ HOLD-WARNING: {ticker} | Day {days_held}/{MAX_HOLD_DAYS} | P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)")
-
-                from scripts.telegram_bot import send_telegram_message
-                send_telegram_message(
-                    f"⚠️ <b>MAX-HOLD WARNING</b>\n\n"
-                    f"📊 Ticker: {ticker} ({STRATEGY})\n"
-                    f"📅 Held: {days_held} days (max: {MAX_HOLD_DAYS})\n"
-                    f"💰 Current P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n"
-                    f"💵 Entry: ₹{entry_price:.2f} | Current: ₹{current_price:.2f}\n\n"
-                    f"<b>⏰ Will auto-exit tomorrow</b>\n\n"
-                    f"<i>Analyze if you want to extend holding manually</i>"
-                )
-
         # CHECK MAX HOLD FIRST (doesn't need price data)
+        # Note: Day-before warnings now handled by check_max_hold_warnings.py at 3 PM
         if days_held >= MAX_HOLD_DAYS:
             # Force exit due to max hold period - use last known price
             if ticker in stock_data and len(stock_data[ticker]) > 0:
