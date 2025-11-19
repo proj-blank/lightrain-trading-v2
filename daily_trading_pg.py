@@ -56,6 +56,7 @@ MIN_COMBINED_SCORE = 50
 USE_ATR_SIZING = True
 MIN_RS_RATING = 60  # Minimum Relative Strength rating for daily trading (1-99 scale)
 MIN_SCORE = 60  # Minimum technical score to qualify for entry
+MAX_HOLD_DAYS = 3  # Maximum calendar days to hold a position (force exit to free capital)
 STRATEGY = 'DAILY'
 
 print("=" * 70)
@@ -617,6 +618,84 @@ for _, row in portfolio[portfolio['Status'] == 'HOLD'].iterrows():
     entry_price = float(row['EntryPrice'])
     entry_date = row.get('EntryDate', datetime.now().strftime("%Y-%m-%d"))
     qty = int(row['Quantity'])
+
+    # Calculate days held
+    entry_dt = pd.to_datetime(entry_date)
+    current_dt = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
+    days_held = (current_dt - entry_dt).days
+
+    # WARNING: Day before max hold - give user time to analyze
+    if days_held == MAX_HOLD_DAYS - 1:
+        if ticker in stock_data and not stock_data[ticker].empty:
+            current_price = float(stock_data[ticker]['Close'].iloc[-1])
+            pnl = (current_price - entry_price) * qty
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+
+            print(f"  ⚠️ HOLD-WARNING: {ticker} | Day {days_held}/{MAX_HOLD_DAYS} | P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)")
+
+            send_telegram_message(
+                f"⚠️ <b>MAX-HOLD WARNING</b>\n\n"
+                f"📊 Ticker: {ticker} ({STRATEGY})\n"
+                f"📅 Held: {days_held} days (max: {MAX_HOLD_DAYS})\n"
+                f"💰 Current P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n"
+                f"💵 Entry: ₹{entry_price:.2f} | Current: ₹{current_price:.2f}\n\n"
+                f"<b>⏰ Will auto-exit tomorrow</b>\n\n"
+                f"<i>Analyze if you want to extend holding manually</i>"
+            )
+
+    # CHECK MAX HOLD FIRST (free up capital from dead positions)
+    if days_held >= MAX_HOLD_DAYS:
+        # Force exit due to max hold period
+        if ticker in stock_data and not stock_data[ticker].empty:
+            current_price = float(stock_data[ticker]['Close'].iloc[-1])
+        else:
+            print(f"  ⚠️ {ticker}: MAX-HOLD reached but no price data - skipping")
+            continue
+
+        pnl = (current_price - entry_price) * qty
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+
+        print(f"  ⏰ MAX-HOLD: {ticker} @ ₹{current_price:.2f} | P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%) | {days_held}d")
+
+        # Send telegram alert
+        send_telegram_message(
+            f"{pnl_emoji} <b>MAX-HOLD EXIT</b>\n\n"
+            f"📊 Ticker: {ticker} ({STRATEGY})\n"
+            f"⏰ Reason: Held {days_held} days (max: {MAX_HOLD_DAYS})\n"
+            f"💰 P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n\n"
+            f"<i>Freeing capital for new opportunities</i>"
+        )
+
+        # Close position and update capital
+        try:
+            close_position(ticker, STRATEGY, current_price, pnl)
+
+            # Credit back original investment
+            original_investment = entry_price * qty
+            credit_capital(STRATEGY, original_investment)
+
+            # Update capital with P&L
+            update_capital(STRATEGY, pnl)
+
+            log_trade(
+                ticker=ticker,
+                strategy=STRATEGY,
+                signal='SELL',
+                price=current_price,
+                quantity=qty,
+                pnl=pnl,
+                notes=f"MAX-HOLD exit after {days_held} days"
+            )
+
+            # Update local portfolio
+            portfolio.loc[portfolio['Ticker'] == ticker, 'Status'] = 'SOLD'
+            print(f"  ✅ Position exited: {ticker}")
+        except Exception as e:
+            print(f"  ❌ Failed to exit position: {e}")
+
+        continue  # Skip other checks for this position
 
     # Skip if on hold (check database)
     if is_position_on_hold(ticker, STRATEGY):
