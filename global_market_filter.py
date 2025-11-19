@@ -14,6 +14,7 @@ import os
 sys.path.insert(0, '/home/ubuntu/trading')
 
 from scripts.telegram_bot import send_telegram_message
+from scripts.db_connection import get_db_cursor
 
 class GlobalMarketFilter:
     """
@@ -427,6 +428,69 @@ Score: {analysis['score']}
             print(f"⚠️ Error saving regime file: {e}")
             return False
 
+    def save_to_database(self, analysis):
+        """Save market regime to database for historical tracking"""
+        try:
+            with get_db_cursor() as cur:
+                # Extract indicator data
+                sp_futures = self.indicators.get('sp_futures', {})
+                nikkei = self.indicators.get('nikkei', {})
+                hang_seng = self.indicators.get('hang_seng', {})
+                gold = self.indicators.get('gold', {})
+                vix = self.indicators.get('vix', {})
+
+                # Insert regime check data
+                cur.execute("""
+                    INSERT INTO market_regime_history (
+                        check_date, regime, score,
+                        position_sizing_multiplier, allow_new_entries,
+                        sp_futures_price, sp_futures_change_pct,
+                        nikkei_price, nikkei_change_pct,
+                        hang_seng_price, hang_seng_change_pct,
+                        gold_price, gold_change_pct,
+                        vix_value
+                    ) VALUES (
+                        CURRENT_DATE, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (check_date)
+                    DO UPDATE SET
+                        regime = EXCLUDED.regime,
+                        score = EXCLUDED.score,
+                        position_sizing_multiplier = EXCLUDED.position_sizing_multiplier,
+                        allow_new_entries = EXCLUDED.allow_new_entries,
+                        sp_futures_price = EXCLUDED.sp_futures_price,
+                        sp_futures_change_pct = EXCLUDED.sp_futures_change_pct,
+                        nikkei_price = EXCLUDED.nikkei_price,
+                        nikkei_change_pct = EXCLUDED.nikkei_change_pct,
+                        hang_seng_price = EXCLUDED.hang_seng_price,
+                        hang_seng_change_pct = EXCLUDED.hang_seng_change_pct,
+                        gold_price = EXCLUDED.gold_price,
+                        gold_change_pct = EXCLUDED.gold_change_pct,
+                        vix_value = EXCLUDED.vix_value
+                """, (
+                    analysis['regime'],
+                    float(analysis['score']) if analysis['score'] is not None else None,
+                    float(analysis['position_sizing_multiplier']) if analysis['position_sizing_multiplier'] is not None else None,
+                    analysis['allow_new_entries'],
+                    float(sp_futures.get('price')) if sp_futures.get('price') is not None else None,
+                    float(sp_futures.get('change_pct')) if sp_futures.get('change_pct') is not None else None,
+                    float(nikkei.get('price')) if nikkei.get('price') is not None else None,
+                    float(nikkei.get('change_pct')) if nikkei.get('change_pct') is not None else None,
+                    float(hang_seng.get('price')) if hang_seng.get('price') is not None else None,
+                    float(hang_seng.get('change_pct')) if hang_seng.get('change_pct') is not None else None,
+                    float(gold.get('price')) if gold.get('price') is not None else None,
+                    float(gold.get('change_pct')) if gold.get('change_pct') is not None else None,
+                    float(vix.get('value')) if vix.get('value') is not None else None
+                ))
+
+            print(f"✅ Market regime saved to database")
+            return True
+
+        except Exception as e:
+            print(f"⚠️ Error saving regime to database: {e}")
+            return False
+
     def run_full_check(self):
         """Run complete market check"""
         print("=" * 70)
@@ -452,6 +516,9 @@ Score: {analysis['score']}
 
         # Save to file
         self.save_to_file(analysis)
+
+        # Save to database for historical tracking
+        self.save_to_database(analysis)
 
         # Send Telegram report
         report = self.format_report(analysis)
