@@ -15,28 +15,25 @@ Complete automation schedule, cron setup, monitoring scripts, and log management
 
 ## Cron Schedule Overview
 
-### Time Zone
-- **AWS Server Timezone**: IST (Indian Standard Time)
-- **Cron Daemon**: Runs in UTC (always, regardless of system timezone)
-- **Conversion**: IST = UTC + 5:30 (subtract 5:30 from IST to get UTC cron time)
-
 ### Complete Cron Schedule
 
-| IST Time | UTC Time | Cron Expression | Script | Purpose |
-|----------|----------|-----------------|--------|---------|
-| 8:30 AM | 3:00 AM | `0 3 * * 1-5` | `run_market_check.sh` | Global regime check (save to file + DB) |
-| 8:30 AM | 3:00 AM | `0 3 * * 1-5` | `run_stocks_screening.sh` | Pre-market stock screening |
-| 9:00 AM | 3:30 AM | `30 3 * * 1-5` | `run_daily_trading.sh` | DAILY strategy execution |
-| 9:00 AM | 3:30 AM | `30 3 * * 1-5` | `daily_screening.py` | Real-time daily screening |
-| 9:00-3:30 PM | 3:30-10:00 AM | `*/5 3-10 * * 1-5` | `monitor_swing_pg.py` | Swing position monitoring (every 5 min) |
-| 9:00-3:30 PM | 3:30-10:00 AM | `*/5 3-10 * * 1-5` | `monitor_daily.py` | Daily position monitoring (every 5 min) |
-| 9:00-3:30 PM | 3:30-10:00 AM | `*/5 3-10 * * 1-5` | `monitor_positions.py` | Legacy position monitor (every 5 min) |
-| 9:25 AM | 3:55 AM | `55 3 * * 1-5` | `run_swing_trading.sh` | SWING strategy execution |
-| 2:00 PM | 8:30 AM | `30 8 * * 1-5` | `regime_2pm_check.py` | Intraday regime deterioration check |
-| 3:00 PM | 9:30 AM | `30 9 * * 1-5` | `check_max_hold_warnings.py` | MAX-HOLD warning + AI analysis |
-| 3:30 PM | 10:00 AM | `0 10 * * 1-5` | `run_eod_summary.sh` | End-of-day summary (both strategies) |
+**All times in IST (Indian Standard Time)**
 
-**Note**: All jobs run Monday-Friday only. Cron uses UTC times (IST - 5:30).
+| Time (IST) | Script | Purpose |
+|------------|--------|---------|
+| 8:30 AM | `run_market_check.sh` | Global regime check (save to file + DB) |
+| 8:30 AM | `run_stocks_screening.sh` | Pre-market stock screening |
+| 9:00 AM | `run_daily_trading.sh` | DAILY strategy execution |
+| 9:00 AM | `daily_screening.py` | Real-time daily screening |
+| 9:00-3:30 PM (every 5 min) | `monitor_swing_pg.py` | Swing position monitoring |
+| 9:00-3:30 PM (every 5 min) | `monitor_daily.py` | Daily position monitoring |
+| 9:00-3:30 PM (every 5 min) | `monitor_positions.py` | Legacy position monitor |
+| 9:25 AM | `run_swing_trading.sh` | SWING strategy execution |
+| 2:00 PM | `regime_2pm_check.py` | Intraday regime deterioration check |
+| 3:00 PM | `check_max_hold_warnings.py` | MAX-HOLD warning + AI analysis |
+| 3:30 PM | `run_eod_summary.sh` | End-of-day summary (both strategies) |
+
+**Note**: All jobs run Monday-Friday only.
 
 ### View Current Crontab
 ```bash
