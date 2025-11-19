@@ -364,7 +364,7 @@ Score <= -3: BEAR      (Position sizing: 0%, New entries: HALT)
 
 #### 8:30 AM IST - Morning Regime Check
 ```bash
-cron: 0 3 * * 1-5  # 8:30 AM IST = 3:00 AM UTC
+cron: 30 8 * * 1-5  # 8:30 AM IST
 script: run_market_check.sh → global_market_filter.py
 ```
 
@@ -395,7 +395,7 @@ script: run_market_check.sh → global_market_filter.py
 
 #### 2:00 PM IST - Intraday Deterioration Check
 ```bash
-cron: 30 8 * * 1-5  # 2:00 PM IST = 8:30 AM UTC
+cron: 0 14 * * 1-5  # 2:00 PM IST
 script: regime_2pm_check.py
 ```
 
