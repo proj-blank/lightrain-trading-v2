@@ -33,8 +33,7 @@ Complete automation schedule, cron setup, monitoring scripts, and log management
 | 9:25 AM | `25 9 * * 1-5` | `run_swing_trading.sh` | SWING strategy execution |
 | 2:00 PM | `0 14 * * 1-5` | `regime_2pm_check.py` | Intraday regime deterioration check |
 | 3:00 PM | `0 15 * * 1-5` | `check_max_hold_warnings.py` | MAX-HOLD warning + AI analysis |
-| 3:30 PM | `30 15 * * 1-5` | `run_eod_summary.sh` | End-of-day capital snapshot |
-| 4:00 PM | `0 16 * * 1-5` | `run_eod_report.sh` | Daily performance report |
+| 3:30 PM | `30 15 * * 1-5` | `run_eod_summary.sh` | End-of-day summary (both strategies) |
 
 **Note**: All jobs run Monday-Friday only. Server timezone is IST.
 
@@ -97,16 +96,13 @@ Track daily positions with more aggressive exit rules. Close all at 3:15 PM if S
 
 ## EOD Processing
 
-### Market Close Summary
-**Schedule**: 3:30 PM IST (10:00 AM UTC)
-- Take capital snapshot
-- Calculate daily P&L
-- Record EOD positions
-
-### Final Report
-**Schedule**: 4:00 PM IST (10:30 AM UTC)
-- Send Telegram EOD summary
-- Performance metrics
+### End-of-Day Summary
+**Schedule**: 3:30 PM IST
+**Script**: `run_eod_summary.sh`
+- Takes capital snapshot for both DAILY and SWING strategies
+- Calculates daily P&L
+- Records EOD positions
+- Sends Telegram summary with performance metrics
 
 ---
 
