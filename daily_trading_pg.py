@@ -49,14 +49,16 @@ except ImportError:
 from scripts.angelone_price_fetcher import get_live_price
 
 # Configuration
-ACCOUNT_SIZE = 500000
-# NO MAX_POSITIONS - using percentage-based allocation (60/20/20 split)
+ACCOUNT_SIZE = 500000  # ₹5L for DAILY strategy
+MAX_DAILY_POSITIONS = 20  # Maximum 20 concurrent DAILY positions
 MAX_POSITION_PCT = 0.20
 MIN_COMBINED_SCORE = 50
 USE_ATR_SIZING = True
 MIN_RS_RATING = 60  # Minimum Relative Strength rating for daily trading (1-99 scale)
 MIN_SCORE = 60  # Minimum technical score to qualify for entry
 MAX_HOLD_DAYS = 3  # Maximum calendar days to hold a position (force exit to free capital)
+RISK_PER_TRADE_PCT = 0.01  # 1% risk per trade (Fixed Risk Position Sizing)
+TARGET_RR_RATIO = 2.0  # 2:1 Risk:Reward ratio for take profit
 STRATEGY = 'DAILY'
 
 print("=" * 70)
@@ -389,10 +391,29 @@ for sell in sell_signals:
         except Exception as e:
             print(f"   ⚠️ Failed to close position {ticker}: {e}")
 
-# PHASE 3: Apply percentage-based allocation (NO FIXED POSITION COUNTS)
+# PHASE 3: Apply percentage-based allocation with position limit
 print("\n🔍 PHASE 3: Applying percentage-based 60/20/20 allocation...")
 
 if total_candidates > 0:
+    # Check current position count
+    with get_db_cursor() as cur:
+        cur.execute("SELECT COUNT(*) as cnt FROM positions WHERE category = %s AND status = 'ACTIVE'", (STRATEGY,))
+        current_positions = cur.fetchone()['cnt']
+
+    print(f"\n📊 POSITION LIMITS:")
+    print(f"   Current DAILY positions: {current_positions}/{MAX_DAILY_POSITIONS}")
+
+    # If at max positions, skip entry
+    if current_positions >= MAX_DAILY_POSITIONS:
+        print(f"\n⚠️ MAX DAILY POSITIONS REACHED ({MAX_DAILY_POSITIONS})")
+        print(f"   Skipping new entries. Wait for positions to close.")
+        send_telegram_message(
+            f"⚠️ DAILY Max Positions Reached\n\n"
+            f"Current: {current_positions}/{MAX_DAILY_POSITIONS}\n\n"
+            f"No new positions entered. Monitoring existing positions."
+        )
+        sys.exit(0)
+
     # Check already deployed capital to prevent over-deployment
     deployed_capital = get_deployed_capital(strategy=STRATEGY)
     available_capital = ACCOUNT_SIZE - deployed_capital
@@ -489,26 +510,44 @@ if total_candidates > 0:
         price, price_source = get_live_price(ticker, yahoo_price)
         print(f"   💰 {ticker}: ₹{price:.2f} ({price_source.upper()})")
 
-        # Calculate quantity
-        qty = int(capital_allocated // price)
-
-        if qty == 0:
-            continue
-
-        # Calculate stop loss and take profit based on ATR
+        # Calculate stop loss based on ATR
         atr = calculate_atr(df, period=14)
         stop_loss = price - (2 * atr) if atr > 0 else price * 0.98  # 2 ATR or 2%
 
-        # Calculate TP based on risk:reward ratio
-        # Target at least 1.5x the risk, OR ₹1000 TOTAL profit (whichever comes FIRST)
+        # FIXED RISK POSITION SIZING (1% risk per trade)
+        # Position size = (Account × Risk%) / (Entry - Stop)
+        risk_amount = ACCOUNT_SIZE * RISK_PER_TRADE_PCT  # ₹5,000 at 1%
+        risk_per_share = price - stop_loss
+
+        if risk_per_share <= 0:
+            print(f"   ⚠️ SKIPPING {ticker}: Invalid stop loss (SL >= Entry)")
+            continue
+
+        # Calculate quantity based on fixed risk
+        qty = int(risk_amount / risk_per_share)
+
+        if qty == 0:
+            print(f"   ⚠️ SKIPPING {ticker}: Position size too small (qty=0)")
+            continue
+
+        # Calculate position value
+        position_value = qty * price
+
+        # Check if position exceeds max position limit
+        max_position_value = ACCOUNT_SIZE * MAX_POSITION_PCT  # 20% of capital
+        if position_value > max_position_value:
+            # Scale down quantity to fit within limit
+            qty = int(max_position_value / price)
+            if qty == 0:
+                print(f"   ⚠️ SKIPPING {ticker}: Price too high for position limit")
+                continue
+            position_value = qty * price
+            print(f"   ⚠️ Position capped at {qty} shares (₹{position_value:,.0f}) due to 20% limit")
+
+        # Calculate take profit using Risk:Reward ratio
+        # TP = Entry + (Risk × RR_Ratio)
         sl_distance = price - stop_loss
-        rr_target_per_share = sl_distance * 1.5  # 1.5:1 risk:reward per share
-
-        # Minimum profit per share to achieve ₹1000 total profit
-        min_profit_per_share = 1000 / qty if qty > 0 else 1000
-
-        # Exit at whichever threshold comes FIRST (min, not max)
-        target_profit_per_share = min(rr_target_per_share, min_profit_per_share)
+        target_profit_per_share = sl_distance * TARGET_RR_RATIO  # 2:1 R:R
         take_profit = price + target_profit_per_share
 
         # Get AI validation BEFORE adding position (Claude 3 Haiku)
