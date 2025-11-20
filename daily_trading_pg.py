@@ -491,6 +491,12 @@ if total_candidates > 0:
 
     print(f"\n🔍 PHASE 4: Executing {len(selected_positions)} selected positions...")
 
+    # Track available capital
+    available_capital = get_available_cash('DAILY')
+    print(f"💰 Available capital: ₹{available_capital:,.0f}")
+    positions_entered = 0
+    capital_deployed = 0
+
     # Execute selected positions
     for position in selected_positions:
         ticker = position['ticker']
@@ -532,6 +538,11 @@ if total_candidates > 0:
 
         # Calculate position value
         position_value = qty * price
+
+        # Check if we have enough capital
+        if position_value > available_capital:
+            print(f"   ⚠️ SKIPPING {ticker}: Insufficient capital (need ₹{position_value:,.0f}, have ₹{available_capital:,.0f})")
+            continue
 
         # Check if position exceeds max position limit
         max_position_value = ACCOUNT_SIZE * MAX_POSITION_PCT  # 30% of capital
@@ -606,6 +617,11 @@ if total_candidates > 0:
             # Debit capital for this position
             position_cost = price * qty
             debit_capital(STRATEGY, position_cost)
+
+            # Track capital deployed
+            capital_deployed += position_cost
+            available_capital -= position_cost
+            positions_entered += 1
 
             # Log trade
             log_trade(
