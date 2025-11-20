@@ -17,7 +17,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
-def send_telegram_message(message, parse_mode="Markdown"):
+def send_telegram_message(message, parse_mode="HTML"):
     """Send a message via Telegram bot."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env")
@@ -53,22 +53,22 @@ def send_daily_report(portfolio_summary, trades_today, signals, strategy="DAILY"
     strategy_name = f"{strategy} TRADING" if strategy in ["DAILY", "SWING"] else "MICROCAP INDIA"
 
     message = f"""
-{strategy_emoji} *{strategy_name} - REPORT*
+{strategy_emoji} <b>{strategy_name} - REPORT</b>
 📅 {date_str}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-💼 *PORTFOLIO SUMMARY*
+💼 <b>PORTFOLIO SUMMARY</b>
 {portfolio_summary}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📝 *TODAY'S TRADES*
+📝 <b>TODAY'S TRADES</b>
 {trades_today if trades_today else 'No trades today'}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📊 *SIGNALS GENERATED*
+📊 <b>SIGNALS GENERATED</b>
 {signals if signals else 'No signals today'}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -84,9 +84,9 @@ def send_trade_alert(ticker, action, price, quantity, details="", strategy="DAIL
     strategy_tag = f"[{strategy}]" if strategy in ["DAILY", "SWING"] else ""
 
     message = f"""
-{emoji} *{action} ALERT* {strategy_tag}
+{emoji} <b>{action} ALERT</b> {strategy_tag}
 
-📊 *{ticker}*
+📊 <b>{ticker}</b>
 💰 Price: ₹{price:.2f}
 📦 Qty: {quantity}
 {details}
