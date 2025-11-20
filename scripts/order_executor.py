@@ -167,16 +167,20 @@ class OrderExecutor:
 
     def _log_simulated_order(self, ticker: str, transaction_type: str, quantity: int,
                             price: float, order_type: str, status: str):
-        """Log simulated order to angelone_orders table for tracking"""
-        with get_db_cursor() as cur:
-            order_id = f"PAPER_{datetime.now().strftime('%Y%m%d%H%M%S')}_{ticker}"
-            cur.execute("""
-                INSERT INTO angelone_orders
-                (order_id, ticker, strategy, transaction_type, quantity, price,
-                 order_type, status, exchange)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'NSE')
-            """, (order_id, ticker, self.strategy, transaction_type, quantity,
-                  price, order_type, status))
+        """Log simulated order to angelone_orders table for tracking (optional)"""
+        try:
+            with get_db_cursor() as cur:
+                order_id = f"PAPER_{datetime.now().strftime('%Y%m%d%H%M%S')}_{ticker}"
+                cur.execute("""
+                    INSERT INTO angelone_orders
+                    (order_id, ticker, strategy, transaction_type, quantity, price,
+                     order_type, status, exchange)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'NSE')
+                """, (order_id, ticker, self.strategy, transaction_type, quantity,
+                      price, order_type, status))
+        except Exception as e:
+            # Table doesn't exist or other DB error - non-critical, continue anyway
+            pass
 
     # ==================== LIVE TRADING (REAL ORDERS) ====================
 
