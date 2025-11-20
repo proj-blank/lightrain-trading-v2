@@ -188,30 +188,60 @@ def calculate_percentage_allocation(
 def select_positions_for_entry(allocation_plan: Dict) -> List[Dict]:
     """
     Convert allocation plan into list of positions ready for entry.
+    Interleaves categories proportionally (60/20/20) to ensure diversity.
 
     Args:
         allocation_plan: Output from calculate_percentage_allocation()
 
     Returns:
-        List of positions with ticker, score, category, capital_allocated
+        List of positions with ticker, score, category, capital_allocated (interleaved by category)
     """
-    positions_to_enter = []
-
+    # Organize stocks by category
+    category_stocks = {}
     for category in ['large', 'mid', 'micro']:
         selected_stocks = allocation_plan['selected_stocks'].get(category, [])
         capital_per_position = allocation_plan['capital_per_position'].get(category, 0)
 
-        for stock in selected_stocks:
+        category_stocks[category] = {
+            'stocks': selected_stocks,
+            'capital': capital_per_position,
+            'index': 0  # Track current position in list
+        }
+
+    # Interleave positions using 60/20/20 ratio
+    # Pattern: L,L,L,M,S,L,L,L,M,S... (3 large, 1 mid, 1 micro)
+    positions_to_enter = []
+    pattern = ['large', 'large', 'large', 'mid', 'micro']
+    pattern_index = 0
+
+    # Keep going until all categories exhausted
+    max_iterations = sum(len(cat['stocks']) for cat in category_stocks.values())
+
+    for _ in range(max_iterations * 2):  # Safety limit
+        # Get next category from pattern
+        category = pattern[pattern_index % len(pattern)]
+        cat_data = category_stocks[category]
+
+        # If this category has stocks remaining, add one
+        if cat_data['index'] < len(cat_data['stocks']):
+            stock = cat_data['stocks'][cat_data['index']]
+
             position = {
                 'ticker': stock['ticker'],
                 'score': stock.get('score', 0),
                 'rs_rating': stock.get('rs_rating', 0),
                 'category': 'Microcap' if category == 'micro' else f"{category.capitalize()}-cap",
-                'capital_allocated': capital_per_position,
-                # Pass through all other fields
+                'capital_allocated': cat_data['capital'],
                 **{k: v for k, v in stock.items() if k not in ['ticker', 'score', 'rs_rating', 'category']}
             }
             positions_to_enter.append(position)
+            cat_data['index'] += 1
+
+        pattern_index += 1
+
+        # Stop if all categories exhausted
+        if all(cat['index'] >= len(cat['stocks']) for cat in category_stocks.values()):
+            break
 
     return positions_to_enter
 
