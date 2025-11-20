@@ -591,7 +591,7 @@ if total_candidates > 0:
             
             # Send AI opinion to Telegram
             emoji = get_verdict_emoji(ai_result['verdict'])
-            ai_msg = f"  🤖 AI: {emoji} {ai_result['verdict']} ({ai_result['confidence']:.0%}) - {ai_result['reasoning']}"
+            ai_msg = f"🤖 <b>{ticker}</b> AI Analysis\n{emoji} {ai_result['verdict']} ({ai_result['confidence']:.0%})\n{ai_result['reasoning']}"
             send_telegram_message(ai_msg)
 
         except Exception as ai_error:
