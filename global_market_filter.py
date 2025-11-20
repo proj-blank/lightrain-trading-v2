@@ -357,14 +357,10 @@ Score: {analysis['score']}
 *Overnight US Markets:*
 """
 
-        if 'sp500' in self.indicators:
-            sp500 = self.indicators['sp500']
-            report += f"S&P 500: {sp500['price']:.2f} ({sp500['change_pct']:+.2f}%)\n"
-            report += f"  Trend: {sp500['trend']} 20-SMA\n"
-
-        if 'nasdaq' in self.indicators:
-            nasdaq = self.indicators['nasdaq']
-            report += f"Nasdaq: {nasdaq['price']:.2f} ({nasdaq['change_pct']:+.2f}%)\n"
+        if 'sp_futures' in self.indicators:
+            sp = self.indicators['sp_futures']
+            report += f"S&P Futures: {sp['price']:.2f} ({sp['change_pct']:+.2f}%)\n"
+            report += f"  Source: {sp['source']}\n"
 
         report += "\n*Volatility:*\n"
 
