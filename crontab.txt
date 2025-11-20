@@ -1,46 +1,70 @@
 # LightRain Trading System - Cron Schedule
-# System timezone: IST, Cron interprets as UTC (IST = UTC + 5:30)
+# ============================================
+# IMPORTANT: Cron timezone is set to IST (TZ=Asia/Kolkata)
+# All times below are in IST, NOT UTC
+# ============================================
+
+# Set timezone for cron to use IST instead of UTC
+TZ=Asia/Kolkata
 
 # ============================================
 # POSITION MONITORS (Every 5 minutes during market hours)
-# Market hours: 9:00 AM - 3:30 PM IST = 3:30 AM - 10:00 AM UTC
+# Market hours: 9:00 AM - 3:30 PM IST
 # ============================================
-*/5 3-10 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_swing_pg.py >> logs/monitor_swing.log 2>&1
-*/5 3-10 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_positions.py >> logs/monitor_positions.log 2>&1
-*/5 3-10 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_daily.py >> logs/monitor_daily.log 2>&1
+*/5 9-15 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_swing_pg.py >> logs/monitor_swing.log 2>&1
+*/5 9-15 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_positions.py >> logs/monitor_positions.log 2>&1
+*/5 9-15 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_daily.py >> logs/monitor_daily.log 2>&1
 
 # ============================================
 # MORNING ROUTINES (Pre-market)
-# 8:30 AM IST = 3:00 AM UTC
+# 8:30 AM IST
 # ============================================
-0 3 * * * cd /home/ubuntu/trading && bash run_market_check.sh >> logs/market_check.log 2>&1
-0 3 * * 1-5 cd /home/ubuntu/trading && bash run_stocks_screening.sh >> logs/stocks_screening_cron.log 2>&1
+30 8 * * 1-5 cd /home/ubuntu/trading && bash run_market_check.sh >> logs/market_check.log 2>&1
+30 8 * * 1-5 cd /home/ubuntu/trading && bash run_stocks_screening.sh >> logs/stocks_screening_cron.log 2>&1
 
 # ============================================
 # TRADING EXECUTION (Market open)
-# 9:00 AM IST = 3:30 AM UTC
+# 8:55 AM IST - Daily screening
+# 9:00 AM IST - Daily trading execution
 # ============================================
-30 3 * * 1-5 cd /home/ubuntu/trading && bash run_daily_trading.sh >> logs/daily_trading_cron.log 2>&1
-30 3 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 daily_screening.py >> logs/daily_screening_cron.log 2>&1
+55 8 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 daily_screening.py >> logs/daily_screening_cron.log 2>&1
+0 9 * * 1-5 cd /home/ubuntu/trading && bash run_daily_trading.sh >> logs/daily_trading_cron.log 2>&1
 
 # ============================================
 # SWING TRADING (After market stabilizes)
-# 9:25 AM IST = 3:55 AM UTC
+# 9:25 AM IST
 # ============================================
-55 3 * * 1-5 cd /home/ubuntu/trading && bash run_swing_trading.sh >> logs/swing_trading_cron.log 2>&1
+25 9 * * 1-5 cd /home/ubuntu/trading && bash run_swing_trading.sh >> logs/swing_trading_cron.log 2>&1
+
+# ============================================
+# THUNDER STRATEGY (30-60 Day Earnings Plays)
+# 10:30 AM IST - Find new opportunities
+# ============================================
+30 10 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 thunder_pipeline.py >> logs/thunder_pipeline.log 2>&1
+
+# ============================================
+# INTRADAY REGIME CHECK
+# 2:00 PM IST - Alert if market deteriorates
+# ============================================
+0 14 * * 1-5 cd /home/ubuntu/trading && python3 regime_2pm_check.py >> logs/regime_2pm.log 2>&1
 
 # ============================================
 # END OF DAY PROCESSING
-# 3:30 PM IST = 10:00 AM UTC (Market close)
-# 4:00 PM IST = 10:30 AM UTC (Final report)
+# 3:00 PM IST - Max-hold warnings check
+# 3:30 PM IST - EOD summary
+# 3:45 PM IST - Thunder position monitor
+# 4:00 PM IST - Thunder post-earnings exits
 # ============================================
-0 10 * * 1-5 cd /home/ubuntu/trading && bash run_eod_summary.sh >> logs/eod_summary.log 2>&1
-30 10 * * 1-5 cd /home/ubuntu/trading && bash run_eod_report.sh >> logs/eod_report.log 2>&1
+0 15 * * 1-5 cd /home/ubuntu/trading && python3 check_max_hold_warnings.py >> logs/max_hold_warnings.log 2>&1
+30 15 * * 1-5 cd /home/ubuntu/trading && bash run_eod_summary.sh >> logs/eod_summary.log 2>&1
+45 15 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 monitor_thunder.py >> logs/monitor_thunder.log 2>&1
+0 16 * * 1-5 cd /home/ubuntu/trading && /usr/bin/python3 thunder_exit.py >> logs/thunder_exit.log 2>&1
 
 # ============================================
 # NOTES
 # ============================================
+# - TZ=Asia/Kolkata ensures all times are IST
 # - Weekday only: 1-5 (Monday-Friday)
 # - All logs redirect to logs/ directory
-# - Monitor scripts run during market hours only
-# - EOD scripts ensure clean close and reporting
+# - Monitor scripts run every 5 minutes during market hours
+# - 2PM regime check alerts if market deteriorates intraday
