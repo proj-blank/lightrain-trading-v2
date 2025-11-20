@@ -51,14 +51,14 @@ from scripts.angelone_price_fetcher import get_live_price
 # Configuration
 ACCOUNT_SIZE = 500000  # ₹5L for DAILY strategy
 MAX_DAILY_POSITIONS = 20  # Maximum 20 concurrent DAILY positions
-MAX_POSITION_PCT = 0.20
+MAX_POSITION_PCT = 0.30  # 30% max position size (increased for 1% risk sizing)
 MIN_COMBINED_SCORE = 50
 USE_ATR_SIZING = True
 MIN_RS_RATING = 60  # Minimum Relative Strength rating for daily trading (1-99 scale)
 MIN_SCORE = 60  # Minimum technical score to qualify for entry
 MAX_HOLD_DAYS = 3  # Maximum calendar days to hold a position (force exit to free capital)
 RISK_PER_TRADE_PCT = 0.01  # 1% risk per trade (Fixed Risk Position Sizing)
-TARGET_RR_RATIO = 2.0  # 2:1 Risk:Reward ratio for take profit
+TARGET_RR_RATIO = 1.5  # 1.5:1 Risk:Reward for faster exits (3-day max hold)
 STRATEGY = 'DAILY'
 
 print("=" * 70)
@@ -534,7 +534,7 @@ if total_candidates > 0:
         position_value = qty * price
 
         # Check if position exceeds max position limit
-        max_position_value = ACCOUNT_SIZE * MAX_POSITION_PCT  # 20% of capital
+        max_position_value = ACCOUNT_SIZE * MAX_POSITION_PCT  # 30% of capital
         if position_value > max_position_value:
             # Scale down quantity to fit within limit
             qty = int(max_position_value / price)
@@ -542,12 +542,12 @@ if total_candidates > 0:
                 print(f"   ⚠️ SKIPPING {ticker}: Price too high for position limit")
                 continue
             position_value = qty * price
-            print(f"   ⚠️ Position capped at {qty} shares (₹{position_value:,.0f}) due to 20% limit")
+            print(f"   ⚠️ Position capped at {qty} shares (₹{position_value:,.0f}) due to 30% limit")
 
         # Calculate take profit using Risk:Reward ratio
         # TP = Entry + (Risk × RR_Ratio)
         sl_distance = price - stop_loss
-        target_profit_per_share = sl_distance * TARGET_RR_RATIO  # 2:1 R:R
+        target_profit_per_share = sl_distance * TARGET_RR_RATIO  # 1.5:1 R:R for quick exits
         take_profit = price + target_profit_per_share
 
         # Get AI validation BEFORE adding position (Claude 3 Haiku)
