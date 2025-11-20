@@ -544,10 +544,14 @@ if total_candidates > 0:
             position_value = qty * price
             print(f"   ⚠️ Position capped at {qty} shares (₹{position_value:,.0f}) due to 30% limit")
 
-        # Calculate take profit using Risk:Reward ratio
-        # TP = Entry + (Risk × RR_Ratio)
+        # Calculate take profit using Risk:Reward ratio OR fixed profit target
+        # Use whichever comes FIRST (min) for quick exits
         sl_distance = price - stop_loss
-        target_profit_per_share = sl_distance * TARGET_RR_RATIO  # 1.5:1 R:R for quick exits
+        rr_target_per_share = sl_distance * TARGET_RR_RATIO  # 1.5:1 R:R
+        fixed_target_per_share = 3000 / qty  # ₹3,000 absolute profit
+
+        # Exit at whichever threshold comes FIRST
+        target_profit_per_share = min(rr_target_per_share, fixed_target_per_share)
         take_profit = price + target_profit_per_share
 
         # Get AI validation BEFORE adding position (Claude 3 Haiku)
