@@ -73,8 +73,7 @@ class OrderExecutor:
                 category=category
             )
 
-            # Log simulated order
-            self._log_simulated_order(ticker, 'BUY', quantity, price, 'MARKET', 'EXECUTED')
+            # Simulated order logged to trades table (no need for separate angelone_orders table)
 
             print(f"📝 [PAPER] BUY {quantity} {ticker} @ ₹{price:.2f}")
 
@@ -137,8 +136,7 @@ class OrderExecutor:
             # Update capital
             update_capital(self.strategy, pnl)
 
-            # Log simulated order
-            self._log_simulated_order(ticker, 'SELL', quantity, price, 'MARKET', 'EXECUTED')
+            # Simulated order logged to trades table (no need for separate angelone_orders table)
 
             pnl_pct = ((price - entry_price) / entry_price) * 100
             print(f"📝 [PAPER] SELL {quantity} {ticker} @ ₹{price:.2f} | P&L: ₹{pnl:+,.2f} ({pnl_pct:+.2f}%)")
@@ -165,22 +163,9 @@ class OrderExecutor:
             print(f"❌ Paper SELL failed: {e}")
             return {'success': False, 'message': str(e), 'mode': 'PAPER'}
 
-    def _log_simulated_order(self, ticker: str, transaction_type: str, quantity: int,
-                            price: float, order_type: str, status: str):
-        """Log simulated order to angelone_orders table for tracking (optional)"""
-        try:
-            with get_db_cursor() as cur:
-                order_id = f"PAPER_{datetime.now().strftime('%Y%m%d%H%M%S')}_{ticker}"
-                cur.execute("""
-                    INSERT INTO angelone_orders
-                    (order_id, ticker, strategy, transaction_type, quantity, price,
-                     order_type, status, exchange)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'NSE')
-                """, (order_id, ticker, self.strategy, transaction_type, quantity,
-                      price, order_type, status))
-        except Exception as e:
-            # Table doesn't exist or other DB error - non-critical, continue anyway
-            pass
+    # REMOVED: _log_simulated_order function
+    # Reason: angelone_orders table doesn't exist and is redundant
+    # All order data already logged in 'trades' and 'positions' tables
 
     # ==================== LIVE TRADING (REAL ORDERS) ====================
 
