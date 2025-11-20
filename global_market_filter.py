@@ -7,6 +7,7 @@ to determine market regime before Indian market opens.
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+import pytz
 import sys
 import os
 
@@ -15,6 +16,9 @@ sys.path.insert(0, '/home/ubuntu/trading')
 
 from scripts.telegram_bot import send_telegram_message
 from scripts.db_connection import get_db_cursor
+
+# IST timezone
+IST = pytz.timezone('Asia/Kolkata')
 
 class GlobalMarketFilter:
     """
@@ -345,7 +349,7 @@ class GlobalMarketFilter:
 
         report = f"""
 {emoji} *GLOBAL MARKET CHECK*
-📅 {datetime.now().strftime('%d %b %Y, %H:%M IST')}
+📅 {datetime.now(IST).strftime('%d %b %Y, %H:%M IST')}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -406,7 +410,7 @@ Score: {analysis['score']}
 
             import json
             data = {
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': datetime.now(IST).isoformat(),
                 'regime': analysis['regime'],
                 'score': analysis['score'],
                 'position_sizing_multiplier': analysis['position_sizing_multiplier'],
@@ -492,7 +496,7 @@ Score: {analysis['score']}
         print("=" * 70)
         print("🌍 GLOBAL MARKET FILTER - MORNING CHECK")
         print("=" * 70)
-        print(f"📅 {datetime.now().strftime('%d %b %Y, %H:%M:%S IST')}")
+        print(f"📅 {datetime.now(IST).strftime('%d %b %Y, %H:%M:%S IST')}")
         print("=" * 70)
 
         # Fetch all indicators (NEW SYSTEM - Nov 19, 2024)
@@ -544,7 +548,7 @@ def get_current_regime():
 
         # Check if data is fresh (within last 24 hours)
         timestamp = datetime.fromisoformat(data['timestamp'])
-        if datetime.now() - timestamp > timedelta(hours=24):
+        if datetime.now(IST) - timestamp > timedelta(hours=24):
             return None
 
         return data
