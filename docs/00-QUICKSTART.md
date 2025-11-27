@@ -314,4 +314,64 @@ git push
 
 ---
 
+## 11. Deployment Workflow (STANDARD PRACTICE)
+
+**When making code changes, follow this workflow:**
+
+1. **SSH to AWS** (production environment):
+   ```bash
+   ssh -i ~/Downloads/projectbank-1.pem ubuntu@13.235.86.250
+   cd ~/trading
+   ```
+
+2. **Make changes directly on AWS**:
+   ```bash
+   # Edit files using vim/nano
+   vim monitor_daily.py
+
+   # Or use direct editing tools
+   ```
+
+3. **Test changes** (if applicable):
+   ```bash
+   # Run script manually to verify
+   python3 monitor_daily.py
+   ```
+
+4. **Commit to GitHub from AWS**:
+   ```bash
+   git add <modified_files>
+   git commit -m "Descriptive commit message"
+   git push
+   ```
+
+5. **Update documentation** (if needed):
+   ```bash
+   vim docs/<relevant_doc>.md
+   git add docs/
+   git commit -m "Update documentation"
+   git push
+   ```
+
+6. **Pull to local Mac** (backup):
+   ```bash
+   # On local Mac
+   cd ~/project_blank/lightrain-trading
+   git pull
+   ```
+
+**Key Points:**
+- ✅ **AWS is the source of truth** (production)
+- ✅ **Always develop on AWS first**
+- ✅ **Push to GitHub from AWS**
+- ✅ **Local Mac is backup only**
+- ✅ **Update docs with every significant change**
+
+**SSH Connection Details:**
+- **Key**: `~/Downloads/projectbank-1.pem`
+- **Host**: `ubuntu@13.235.86.250`
+- **Trading Dir**: `~/trading`
+
+---
+
 **Need More Help?** See 01-SYSTEM-OVERVIEW.md for high-level architecture or 11-TROUBLESHOOTING.md for specific issues.
