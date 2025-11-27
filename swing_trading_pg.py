@@ -49,8 +49,8 @@ from scripts.angelone_price_fetcher import get_live_price
 import yfinance as yf
 
 # Configuration
-ACCOUNT_SIZE = 500000  # ₹5 Lakh (separate from daily trading, ₹500K each for daily+swing)
-# NO MAX_POSITIONS - using percentage-based allocation (60/20/20 split)
+ACCOUNT_SIZE = 500000  # ₹5 Lakh for SWING strategy
+MAX_SWING_POSITIONS = 10  # Maximum 10 concurrent SWING positions
 MAX_POSITION_PCT = 0.14  # 14% per position
 MIN_SIGNAL_SCORE = 65  # Raised from 60 to be more selective
 MIN_RS_RATING = 65  # Minimum Relative Strength rating (1-99 scale)
@@ -507,8 +507,27 @@ def smart_scan_with_allocation(portfolio, current_date, cash, regime_multiplier=
         log("❌ No BUY signals found")
         return portfolio, entries
 
-    # Phase 3: Apply percentage-based 60/20/20 allocation (NO FIXED POSITION COUNTS)
+    # Phase 3: Apply percentage-based 60/20/20 allocation with position limit
     log(f"\n🔍 Phase 3: Percentage-based allocation (60/20/20)...")
+
+    # Check current position count
+    with get_db_cursor() as cur:
+        cur.execute("SELECT COUNT(*) as cnt FROM positions WHERE category = %s AND status = 'ACTIVE'", (STRATEGY,))
+        current_positions = cur.fetchone()['cnt']
+
+    log(f"\n📊 POSITION LIMITS:")
+    log(f"   Current SWING positions: {current_positions}/{MAX_SWING_POSITIONS}")
+
+    # If at max positions, skip entry
+    if current_positions >= MAX_SWING_POSITIONS:
+        log(f"\n⚠️ MAX SWING POSITIONS REACHED ({MAX_SWING_POSITIONS})")
+        log(f"   Skipping new entries. Wait for positions to close.")
+        send_telegram_message(
+            f"⚠️ SWING Max Positions Reached\n\n"
+            f"Current: {current_positions}/{MAX_SWING_POSITIONS}\n\n"
+            f"No new positions entered. Monitoring existing positions."
+        )
+        return portfolio, entries
 
     # Calculate percentage-based allocation using available cash
     account_size = get_cash()  # Available cash = capital - invested
