@@ -57,7 +57,7 @@ MIN_RS_RATING = 65  # Minimum Relative Strength rating (1-99 scale)
 TARGET_PROFIT_PCT = 0.04  # 4%
 STOP_LOSS_PCT = 0.02  # 2%
 TRAILING_STOP_PCT = 0.01  # 1%
-MAX_HOLD_DAYS = 10
+MAX_HOLD_DAYS = 15
 STRATEGY = 'SWING'
 
 # Log file
