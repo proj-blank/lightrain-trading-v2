@@ -154,76 +154,74 @@ def monitor_positions():
     else:
         log("All positions within TP/SL range")
 
-    # Intraday capital reallocation logic
-    if exits_made > 0:
-        try:
-            log("\n💰 Checking freed capital for intraday reallocation...")
-            available_cash = get_available_cash(STRATEGY)
-            log(f"   Available capital: ₹{available_cash:,.0f}")
+    # Intraday capital reallocation logic (check on EVERY run, not just when exits happen)
+    try:
+        log("\n💰 Checking freed capital for intraday capital reallocation...")
+        available_cash = get_available_cash(STRATEGY)
+        log(f"   Available capital: ₹{available_cash:,.0f}")
 
-            # Only reallocate if we have significant freed capital (> Rs 1L)
-            if available_cash > 100000:
-                log(f"   ✅ Sufficient capital available (> ₹1,00,000)")
-                log(f"   🔄 Triggering intraday reallocation pipeline...")
+        # Only reallocate if we have significant freed capital (> Rs 1L)
+        if available_cash > 100000:
+            log(f"   ✅ Sufficient capital available (> ₹1,00,000)")
+            log(f"   🔄 Triggering intraday capital reallocation pipeline...")
 
-                # Set environment flag for midday entry mode
-                os.environ['MIDDAY_ENTRY'] = 'true'
+            # Set environment flag for midday entry mode
+            os.environ['MIDDAY_ENTRY'] = 'true'
 
-                # Get path to daily_trading_pg.py
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                daily_trading_script = os.path.join(script_dir, 'daily_trading_pg.py')
+            # Get path to daily_trading_pg.py
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            daily_trading_script = os.path.join(script_dir, 'daily_trading_pg.py')
 
-                # Get python path (same as current interpreter)
-                python_path = sys.executable
+            # Get python path (same as current interpreter)
+            python_path = sys.executable
 
-                # Send Telegram notification before running
+            # Send Telegram notification before running
+            send_telegram_message(
+                f"🔄 <b>INTRADAY CAPITAL REALLOCATION TRIGGERED</b>\n\n"
+                f"💰 Available Capital: ₹{available_cash:,.0f}\n\n"
+                f"Running full pipeline:\n"
+                f"1️⃣ Global market check\n"
+                f"2️⃣ Stock screening\n"
+                f"3️⃣ Signal generation\n"
+                f"4️⃣ Position allocation\n\n"
+                f"⏳ This may take 2-3 minutes..."
+            )
+
+            # Run daily_trading_pg.py as subprocess
+            log(f"   🚀 Running: {python_path} {daily_trading_script}")
+            result = subprocess.run(
+                [python_path, daily_trading_script],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+
+            if result.returncode == 0:
+                log(f"   ✅ Intraday capital reallocation completed successfully")
                 send_telegram_message(
-                    f"🔄 <b>INTRADAY REALLOCATION TRIGGERED</b>\n\n"
-                    f"💰 Freed Capital: ₹{available_cash:,.0f}\n"
-                    f"📊 Exited Positions: {exits_made}\n\n"
-                    f"Running full pipeline:\n"
-                    f"1️⃣ Global market check\n"
-                    f"2️⃣ Stock screening\n"
-                    f"3️⃣ Signal generation\n"
-                    f"4️⃣ Position allocation\n\n"
-                    f"⏳ This may take 2-3 minutes..."
+                    f"✅ <b>INTRADAY CAPITAL REALLOCATION COMPLETE</b>\n\n"
+                    f"Check position updates above ⬆️"
                 )
-
-                # Run daily_trading_pg.py as subprocess
-                log(f"   🚀 Running: {python_path} {daily_trading_script}")
-                result = subprocess.run(
-                    [python_path, daily_trading_script],
-                    capture_output=True,
-                    text=True,
-                    timeout=300  # 5 minute timeout
-                )
-
-                if result.returncode == 0:
-                    log(f"   ✅ Intraday reallocation completed successfully")
-                    send_telegram_message(
-                        f"✅ <b>INTRADAY REALLOCATION COMPLETE</b>\n\n"
-                        f"Check position updates above ⬆️"
-                    )
-                else:
-                    log(f"   ❌ Intraday reallocation failed with exit code {result.returncode}")
-                    log(f"   Error output: {result.stderr}")
-                    send_telegram_message(
-                        f"❌ <b>INTRADAY REALLOCATION FAILED</b>\n\n"
-                        f"Exit code: {result.returncode}\n"
-                        f"Check logs for details"
-                    )
-
-                # Clean up environment variable
-                if 'MIDDAY_ENTRY' in os.environ:
-                    del os.environ['MIDDAY_ENTRY']
-
             else:
-                log(f"   ⏸️ Insufficient capital for reallocation (need > ₹1,00,000)")
+                log(f"   ❌ Intraday capital reallocation failed with exit code {result.returncode}")
+                log(f"   Error output: {result.stderr}")
+                send_telegram_message(
+                    f"❌ <b>INTRADAY CAPITAL REALLOCATION FAILED</b>\n\n"
+                    f"Exit code: {result.returncode}\n"
+                    f"Check logs for details"
+                )
 
-        except Exception as e:
-            log(f"   ⚠️ Error during intraday reallocation check: {e}")
-            import traceback
-            traceback.print_exc()
+            # Clean up environment variable
+            if 'MIDDAY_ENTRY' in os.environ:
+                del os.environ['MIDDAY_ENTRY']
+
+        else:
+            log(f"   ⏸️ Insufficient capital for capital reallocation (need > ₹1,00,000)")
+
+    except Exception as e:
+        log(f"   ⚠️ Error during intraday capital reallocation check: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     try:
