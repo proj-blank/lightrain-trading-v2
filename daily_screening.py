@@ -326,6 +326,77 @@ def screen_all_stocks():
     return pd.DataFrame(results)
 
 
+
+
+def save_to_database(screening_df):
+    """Save screening results to screened_stocks table."""
+    from scripts.db_connection import get_db_cursor
+    
+    print()
+    print("=" * 80)
+    print("💾 SAVING TO DATABASE")
+    print("=" * 80)
+    
+    inserted_count = 0
+    updated_count = 0
+    
+    with get_db_cursor() as cur:
+        # Delete old data (older than today)
+        cur.execute("""
+            DELETE FROM screened_stocks
+            WHERE last_updated < CURRENT_DATE
+        """)
+        deleted_count = cur.rowcount
+        
+        if deleted_count > 0:
+            print(f"  🗑️  Deleted {deleted_count} old records")
+        
+        # Insert/update stocks with all metrics
+        for _, row in screening_df.iterrows():
+            cur.execute("""
+                INSERT INTO screened_stocks (
+                    ticker, category, score, rs_rating, avg_volume, 
+                    atr_pct, trend_strength, extreme_pct, rsi_range, 
+                    last_updated
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE)
+                ON CONFLICT (ticker)
+                DO UPDATE SET
+                    category = EXCLUDED.category,
+                    score = EXCLUDED.score,
+                    rs_rating = EXCLUDED.rs_rating,
+                    avg_volume = EXCLUDED.avg_volume,
+                    atr_pct = EXCLUDED.atr_pct,
+                    trend_strength = EXCLUDED.trend_strength,
+                    extreme_pct = EXCLUDED.extreme_pct,
+                    rsi_range = EXCLUDED.rsi_range,
+                    last_updated = CURRENT_DATE
+                RETURNING (xmax = 0) AS inserted
+            """, (
+                row['ticker'],
+                row['category'],
+                int(row['score']),
+                None,  # rs_rating - set to NULL for now
+                int(row['avg_volume']),
+                float(row['atr_pct']),
+                int(row['trend_strength']),
+                int(row['extreme_pct']),
+                int(row['rsi_range'])
+            ))
+            
+            result = cur.fetchone()
+            if result['inserted']:
+                inserted_count += 1
+            else:
+                updated_count += 1
+    
+    print(f"  ✅ Inserted {inserted_count} new stocks")
+    print(f"  🔄 Updated {updated_count} existing stocks")
+    print(f"  📊 Total: {len(screening_df)} stocks saved to database")
+    
+    return inserted_count, updated_count
+
+
 def update_watchlist(screening_df, min_score=60):
     """
     Update watchlist based on screening results and open positions.
@@ -486,13 +557,16 @@ def main():
     added = set(watchlist) - set(old_watchlist)
     removed = set(old_watchlist) - set(watchlist)
 
-    # 4. Save log
+    # 4. Save to database
+    save_to_database(screening_df)
+
+    # 5. Save log
     save_screening_log(screening_df)
 
-    # 5. Send Telegram notification
+    # 6. Send Telegram notification
     send_screening_notification(screening_df, watchlist, added, removed)
 
-    # 6. Summary
+    # 7. Summary
     print()
     print("=" * 80)
     print("✅ SCREENING COMPLETE")
