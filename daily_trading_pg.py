@@ -142,6 +142,63 @@ else:
     print("⚠️ No market regime data found (run global_market_filter.py at 8:30 AM)")
     print("   Using default 100% position sizing")
 
+# ========== SMART ENTRY VALIDATOR (9:15 AM + 9:30 AM) ==========
+from scripts.smart_entry_validator import (
+    validate_nifty_at_open,
+    analyze_nifty_strength_930
+)
+
+# STEP 1: Check Nifty regime at 9:15 AM
+print("\n🔍 SMART ENTRY: Checking Nifty regime (9:15 AM)...")
+action_915, regime_915, regime_multiplier_915 = validate_nifty_at_open()
+
+if action_915 == "SKIP":
+    print(f"❌ BEAR regime detected: {regime_915}")
+    print(f"   Regime multiplier: {regime_multiplier_915} (0% = SKIP ALL)")
+    send_telegram_message(
+        f"🚫 DAILY Trading Blocked (Smart Entry)\n\n"
+        f"Market Regime (9:15 AM): {regime_915}\n"
+        f"Multiplier: {regime_multiplier_915*100:.0f}%\n\n"
+        f"Smart entry validator says SKIP ALL entries.\n"
+        f"No positions entered today."
+    )
+    sys.exit(0)
+
+print(f"✅ Nifty regime: {regime_915} (multiplier: {regime_multiplier_915*100:.0f}%)")
+
+# STEP 2: Check Nifty opening candle at 9:30 AM
+print("🔍 SMART ENTRY: Analyzing Nifty opening candle (9:30 AM)...")
+candle_data, candle_strength, slice_pct = analyze_nifty_strength_930()
+
+if slice_pct == 0:
+    print(f"❌ STRONG_BEARISH opening candle detected")
+    print(f"   Pattern: {candle_data.get('pattern', 'Unknown')}")
+    print(f"   Slice %: {slice_pct} (0% = SKIP ALL)")
+    send_telegram_message(
+        f"🚫 DAILY Trading Blocked (Smart Entry)\n\n"
+        f"Nifty Opening Candle (9:30 AM): {candle_data.get('pattern', 'STRONG_BEARISH')}\n"
+        f"Strength: {candle_strength:.1f}\n"
+        f"Slice %: {slice_pct}%\n\n"
+        f"Smart entry validator says SKIP ALL entries.\n"
+        f"No positions entered today."
+    )
+    sys.exit(0)
+
+print(f"✅ Nifty candle: {candle_data.get('pattern', 'Unknown')} (strength: {candle_strength:.1f}, slice: {slice_pct}%)")
+
+# STEP 3: Calculate final deployment percentage
+SMART_ENTRY_DEPLOYMENT_PCT = regime_multiplier_915 * (slice_pct / 100)
+
+print(f"\n💡 SMART ENTRY FINAL DEPLOYMENT:")
+print(f"   Regime multiplier: {regime_multiplier_915*100:.0f}%")
+print(f"   Candle slice: {slice_pct}%")
+print(f"   Final deployment: {SMART_ENTRY_DEPLOYMENT_PCT*100:.0f}%")
+
+# Override position sizing with smart entry result
+REGIME_MULTIPLIER = SMART_ENTRY_DEPLOYMENT_PCT
+print(f"   Overriding position sizing with {REGIME_MULTIPLIER*100:.0f}% deployment\n")
+# ========== END SMART ENTRY VALIDATOR ==========
+
 # Load stocks from screened_stocks table
 print("\n📥 Loading stocks from NSE universe...")
 stocks_to_screen = []

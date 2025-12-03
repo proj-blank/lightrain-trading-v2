@@ -831,6 +831,60 @@ def main():
             log(f"⚠️ Error reading halt file: {e}")
             # Continue trading on error to be safe
 
+
+    # ========== SMART ENTRY VALIDATOR (9:15 AM + 9:30 AM) ==========
+    from scripts.smart_entry_validator import (
+        validate_nifty_at_open,
+        analyze_nifty_strength_930
+    )
+
+    # STEP 1: Check Nifty regime at 9:15 AM
+    log("\n🔍 SMART ENTRY: Checking Nifty regime (9:15 AM)...")
+    action_915, regime_915, regime_multiplier_915 = validate_nifty_at_open()
+
+    if action_915 == "SKIP":
+        log(f"❌ BEAR regime detected: {regime_915}")
+        log(f"   Regime multiplier: {regime_multiplier_915} (0% = SKIP ALL)")
+        send_telegram_message(
+            f"🚫 SWING Trading Blocked (Smart Entry)\n\n"
+            f"Market Regime (9:15 AM): {regime_915}\n"
+            f"Multiplier: {regime_multiplier_915*100:.0f}%\n\n"
+            f"Smart entry validator says SKIP ALL entries.\n"
+            f"No positions entered today."
+        )
+        return
+
+    log(f"✅ Nifty regime: {regime_915} (multiplier: {regime_multiplier_915*100:.0f}%)")
+
+    # STEP 2: Check Nifty opening candle at 9:30 AM
+    log("🔍 SMART ENTRY: Analyzing Nifty opening candle (9:30 AM)...")
+    candle_data, candle_strength, slice_pct = analyze_nifty_strength_930()
+
+    if slice_pct == 0:
+        log(f"❌ STRONG_BEARISH opening candle detected")
+        log(f"   Pattern: {candle_data.get('pattern', 'Unknown')}")
+        log(f"   Slice %: {slice_pct} (0% = SKIP ALL)")
+        send_telegram_message(
+            f"🚫 SWING Trading Blocked (Smart Entry)\n\n"
+            f"Nifty Opening Candle (9:30 AM): {candle_data.get('pattern', 'STRONG_BEARISH')}\n"
+            f"Strength: {candle_strength:.1f}\n"
+            f"Slice %: {slice_pct}%\n\n"
+            f"Smart entry validator says SKIP ALL entries.\n"
+            f"No positions entered today."
+        )
+        return
+
+    log(f"✅ Nifty candle: {candle_data.get('pattern', 'Unknown')} (strength: {candle_strength:.1f}, slice: {slice_pct}%)")
+
+    # STEP 3: Calculate final deployment percentage
+    SMART_ENTRY_DEPLOYMENT_PCT = regime_multiplier_915 * (slice_pct / 100)
+
+    log(f"\n💡 SMART ENTRY FINAL DEPLOYMENT:")
+    log(f"   Regime multiplier: {regime_multiplier_915*100:.0f}%")
+    log(f"   Candle slice: {slice_pct}%")
+    log(f"   Final deployment: {SMART_ENTRY_DEPLOYMENT_PCT*100:.0f}%")
+    # ========== END SMART ENTRY VALIDATOR ==========
+
     # 🌍 Global Market Regime Check
     from global_market_filter import get_current_regime
     regime_data = get_current_regime()
