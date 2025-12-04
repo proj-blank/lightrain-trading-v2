@@ -106,9 +106,9 @@ with get_db_connection() as conn:
             ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             date.today(), STRATEGY, ticker,
-            nifty_data.get('gap',0), nifty_data.get('move',0), regime, multiplier,
-            candle.get('pattern'), candle.get('strength',0), slice_pct,
-            pattern, strength, pdata['current'], limit,
+            float(nifty_data.get('gap',0)), float(nifty_data.get('move',0)), regime, float(multiplier),
+            candle.get('pattern'), float(candle.get('strength',0)), float(slice_pct),
+            pattern, float(strength), float(pdata['current']), float(limit),
             would_enter, reason_txt
         ))
         

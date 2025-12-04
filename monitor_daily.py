@@ -2,6 +2,7 @@
 """
 Monitor DAILY strategy positions for TP/SL hits
 Runs every 5 minutes during market hours
+Enhanced with regime-based capital reallocation using EXISTING global_market_filter.py
 """
 import yfinance as yf
 from datetime import datetime
@@ -11,6 +12,7 @@ from scripts.db_connection import (
     get_available_cash
 )
 from scripts.telegram_bot import send_telegram_message
+from global_market_filter import get_current_regime
 import os
 import subprocess
 import sys
@@ -92,11 +94,11 @@ def monitor_positions():
 
                 # Send Telegram notification
                 send_telegram_message(
-                    f"🎯 DAILY TP Hit!\n\n"
-                    f"Ticker: {ticker}\n"
-                    f"Entry: ₹{entry_price:.2f}\n"
-                    f"Exit: ₹{current_price:.2f}\n"
-                    f"P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n"
+                    f"🎯 DAILY TP Hit!\\n\\n"
+                    f"Ticker: {ticker}\\n"
+                    f"Entry: ₹{entry_price:.2f}\\n"
+                    f"Exit: ₹{current_price:.2f}\\n"
+                    f"P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\\n"
                     f"Qty: {qty}"
                 )
 
@@ -129,11 +131,11 @@ def monitor_positions():
 
                 # Send Telegram notification
                 send_telegram_message(
-                    f"🛑 DAILY SL Hit\n\n"
-                    f"Ticker: {ticker}\n"
-                    f"Entry: ₹{entry_price:.2f}\n"
-                    f"Exit: ₹{current_price:.2f}\n"
-                    f"P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n"
+                    f"🛑 DAILY SL Hit\\n\\n"
+                    f"Ticker: {ticker}\\n"
+                    f"Entry: ₹{entry_price:.2f}\\n"
+                    f"Exit: ₹{current_price:.2f}\\n"
+                    f"P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\\n"
                     f"Qty: {qty}"
                 )
 
@@ -154,72 +156,114 @@ def monitor_positions():
     else:
         log("All positions within TP/SL range")
 
-    # Intraday capital reallocation logic (check on EVERY run, not just when exits happen)
+    # REGIME-BASED CAPITAL REALLOCATION (using existing global_market_filter.py)
     try:
-        log("\n💰 Checking freed capital for intraday capital reallocation...")
+        log("\\n💰 Checking freed capital for regime-based re-entry...")
         available_cash = get_available_cash(STRATEGY)
         log(f"   Available capital: ₹{available_cash:,.0f}")
 
         # Only reallocate if we have significant freed capital (> Rs 1L)
         if available_cash > 100000:
             log(f"   ✅ Sufficient capital available (> ₹1,00,000)")
-            log(f"   🔄 Triggering intraday capital reallocation pipeline...")
 
-            # Set environment flag for midday entry mode
-            os.environ['MIDDAY_ENTRY'] = 'true'
+            # Check market regime using EXISTING system
+            log(f"   🌍 Checking market regime using global_market_filter...")
+            regime_data = get_current_regime()
 
-            # Get path to daily_trading_pg.py
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            daily_trading_script = os.path.join(script_dir, 'daily_trading_pg.py')
+            if regime_data:
+                regime = regime_data['regime']
+                score = regime_data['score']
+                
+                # Extract indicator details for display
+                indicators = regime_data.get('indicators', {})
+                nikkei = indicators.get('nikkei', {})
+                hsi = indicators.get('hang_seng', {})
+                sp_futures = indicators.get('sp_futures', {})
+                gold = indicators.get('gold', {})
+                vix = indicators.get('vix', {})
 
-            # Get python path (same as current interpreter)
-            python_path = sys.executable
+                log(f"   📊 Regime: {regime} (Score: {score:.2f})")
+                log(f"       Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%")
+                log(f"       S&P Futures: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%")
+                log(f"       VIX: {vix.get('value', 'N/A'):.2f}")
 
-            # Send Telegram notification before running
-            send_telegram_message(
-                f"🔄 <b>INTRADAY CAPITAL REALLOCATION TRIGGERED</b>\n\n"
-                f"💰 Available Capital: ₹{available_cash:,.0f}\n\n"
-                f"Running full pipeline:\n"
-                f"1️⃣ Global market check\n"
-                f"2️⃣ Stock screening\n"
-                f"3️⃣ Signal generation\n"
-                f"4️⃣ Position allocation\n\n"
-                f"⏳ This may take 2-3 minutes..."
-            )
+                # Calculate capital allocation based on YOUR requirements (75% BULL, 50% NEUTRAL, 0% BEAR)
+                if regime == "BULL":
+                    allocation_pct = 0.75
+                elif regime in ["NEUTRAL", "CAUTION"]:  # Treat CAUTION as NEUTRAL
+                    allocation_pct = 0.50
+                else:  # BEAR
+                    allocation_pct = 0.00
 
-            # Run daily_trading_pg.py as subprocess
-            log(f"   🚀 Running: {python_path} {daily_trading_script}")
-            result = subprocess.run(
-                [python_path, daily_trading_script],
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
+                deployable_capital = available_cash * allocation_pct
 
-            if result.returncode == 0:
-                log(f"   ✅ Intraday capital reallocation completed successfully")
-                send_telegram_message(
-                    f"✅ <b>INTRADAY CAPITAL REALLOCATION COMPLETE</b>\n\n"
-                    f"Check position updates above ⬆️"
-                )
+                log(f"   💼 Capital allocation: {allocation_pct*100:.0f}% = ₹{deployable_capital:,.0f}")
+
+                if deployable_capital > 0:
+                    log(f"   🔄 Triggering DAILY smart entry with regime-based capital allocation...")
+
+                    # Get path to daily_trading_smartentry.py
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    daily_smartentry_script = os.path.join(script_dir, 'daily_trading_smartentry.py')
+
+                    # Get python path
+                    python_path = sys.executable
+
+                    # Send Telegram notification before running
+                    send_telegram_message(
+                        f"🔄 <b>REGIME-BASED RE-ENTRY TRIGGERED (DAILY)</b>\\n\\n"
+                        f"💰 Available: ₹{available_cash:,.0f}\\n"
+                        f"🌍 Regime: {regime} (Score: {score:.2f})\\n"
+                        f"📊 Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%\\n"
+                        f"📈 S&P: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%\\n"
+                        f"📉 VIX: {vix.get('value', 'N/A'):.2f}\\n\\n"
+                        f"💼 Deploying: ₹{deployable_capital:,.0f} ({allocation_pct*100:.0f}%)\\n\\n"
+                        f"⏳ Running smart entry..."
+                    )
+
+                    # Run daily_trading_smartentry.py as subprocess
+                    log(f"   🚀 Running: {python_path} {daily_smartentry_script}")
+                    result = subprocess.run(
+                        [python_path, daily_smartentry_script],
+                        capture_output=True,
+                        text=True,
+                        timeout=300  # 5 minute timeout
+                    )
+
+                    if result.returncode == 0:
+                        log(f"   ✅ Smart entry completed successfully")
+                        send_telegram_message(
+                            f"✅ <b>DAILY RE-ENTRY COMPLETE</b>\\n\\n"
+                            f"Check position updates above ⬆️"
+                        )
+                    else:
+                        log(f"   ❌ Smart entry failed with exit code {result.returncode}")
+                        log(f"   Error output: {result.stderr}")
+                        send_telegram_message(
+                            f"❌ <b>DAILY RE-ENTRY FAILED</b>\\n\\n"
+                            f"Exit code: {result.returncode}\\n"
+                            f"Check logs for details"
+                        )
+                else:
+                    log(f"   ⏸️ BEAR regime detected - skipping re-entry (0% allocation)")
+                    send_telegram_message(
+                        f"🐻 <b>DAILY RE-ENTRY SKIPPED</b>\\n\\n"
+                        f"💰 Available: ₹{available_cash:,.0f}\\n"
+                        f"🌍 Regime: {regime} (Score: {score:.2f})\\n"
+                        f"📊 Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%\\n"
+                        f"📈 S&P: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%\\n"
+                        f"📉 VIX: {vix.get('value', 'N/A'):.2f}\\n\\n"
+                        f"⚠️ BEAR market conditions - capital preserved"
+                    )
+
             else:
-                log(f"   ❌ Intraday capital reallocation failed with exit code {result.returncode}")
-                log(f"   Error output: {result.stderr}")
-                send_telegram_message(
-                    f"❌ <b>INTRADAY CAPITAL REALLOCATION FAILED</b>\n\n"
-                    f"Exit code: {result.returncode}\n"
-                    f"Check logs for details"
-                )
-
-            # Clean up environment variable
-            if 'MIDDAY_ENTRY' in os.environ:
-                del os.environ['MIDDAY_ENTRY']
+                log(f"   ⚠️ No regime data available (run global_market_filter.py first)")
 
         else:
-            log(f"   ⏸️ Insufficient capital for capital reallocation (need > ₹1,00,000)")
+            log(f"   ⏸️ Insufficient capital for re-entry (need > ₹1,00,000)")
 
     except Exception as e:
-        log(f"   ⚠️ Error during intraday capital reallocation check: {e}")
+        log(f"   ⚠️ Error during regime-based re-entry check: {e}")
         import traceback
         traceback.print_exc()
 

@@ -2,11 +2,7 @@
 """
 Monitor SWING strategy positions for TP/SL hits and Profit-Lock Extension
 Runs every 5 minutes during market hours
-
-Features:
-- Standard TP/SL monitoring
-- Profit-Lock Extension: At day 8+, if profitable, lock profit floor and extend hold to 15 days
-- Dynamic trailing: SL trails up but never below locked floor
+Enhanced with regime-based capital reallocation using EXISTING global_market_filter.py
 """
 
 import os
@@ -16,10 +12,13 @@ sys.path.insert(0, '/home/ubuntu/trading')
 from datetime import datetime, date
 from scripts.db_connection import (
     get_db_cursor, close_position, log_trade,
-    update_capital, credit_capital, get_db_connection
+    update_capital, credit_capital, get_db_connection,
+    get_available_cash
 )
 from scripts.telegram_bot import send_telegram_message
+from global_market_filter import get_current_regime
 import yfinance as yf
+import subprocess
 
 STRATEGY = 'SWING'
 PROFIT_LOCK_START_DAY = 8  # Start profit-locking at day 8
@@ -161,14 +160,14 @@ def monitor_positions():
 
                 # Send Telegram notification
                 send_telegram_message(
-                    f"🔒 <b>PROFIT-LOCK ACTIVATED</b>\n\n"
-                    f"<b>Ticker:</b> {ticker} (SWING)\n"
-                    f"<b>Days Held:</b> {days_held}/{EXTENDED_MAX_HOLD}\n"
-                    f"<b>Current P&L:</b> {pnl_pct:+.2f}%\n\n"
-                    f"✅ <b>Locked Minimum:</b> +{locked_pct}% (Rs {locked_floor:,.2f})\n"
-                    f"📈 <b>New TP:</b> Rs {new_tp:,.2f}\n"
-                    f"🛡️ <b>New SL:</b> Rs {new_sl:,.2f}\n"
-                    f"⏰ <b>Extended Hold:</b> {EXTENDED_MAX_HOLD} days\n\n"
+                    f"🔒 <b>PROFIT-LOCK ACTIVATED</b>\\n\\n"
+                    f"<b>Ticker:</b> {ticker} (SWING)\\n"
+                    f"<b>Days Held:</b> {days_held}/{EXTENDED_MAX_HOLD}\\n"
+                    f"<b>Current P&L:</b> {pnl_pct:+.2f}%\\n\\n"
+                    f"✅ <b>Locked Minimum:</b> +{locked_pct}% (Rs {locked_floor:,.2f})\\n"
+                    f"📈 <b>New TP:</b> Rs {new_tp:,.2f}\\n"
+                    f"🛡️ <b>New SL:</b> Rs {new_sl:,.2f}\\n"
+                    f"⏰ <b>Extended Hold:</b> {EXTENDED_MAX_HOLD} days\\n\\n"
                     f"<i>Position will trail upwards while protecting profit floor</i>"
                 )
 
@@ -224,12 +223,12 @@ def monitor_positions():
 
                 # Send Telegram notification
                 send_telegram_message(
-                    f"🎯 <b>SWING TP Hit!</b>\n\n"
-                    f"<b>Ticker:</b> {ticker}\n"
-                    f"<b>Entry:</b> Rs {entry_price:.2f}\n"
-                    f"<b>Exit:</b> Rs {current_price:.2f}\n"
-                    f"<b>P&L:</b> Rs {pnl:,.0f} ({pnl_pct:+.2f}%)\n"
-                    f"<b>Days Held:</b> {days_held}\n"
+                    f"🎯 <b>SWING TP Hit!</b>\\n\\n"
+                    f"<b>Ticker:</b> {ticker}\\n"
+                    f"<b>Entry:</b> Rs {entry_price:.2f}\\n"
+                    f"<b>Exit:</b> Rs {current_price:.2f}\\n"
+                    f"<b>P&L:</b> Rs {pnl:,.0f} ({pnl_pct:+.2f}%)\\n"
+                    f"<b>Days Held:</b> {days_held}\\n"
                     f"<b>Qty:</b> {qty}"
                 )
 
@@ -264,14 +263,14 @@ def monitor_positions():
                 # Send Telegram notification
                 sl_emoji = "🛡️" if pnl > 0 else "🛑"
                 send_telegram_message(
-                    f"{sl_emoji} <b>SWING SL Hit</b>\n\n"
-                    f"<b>Ticker:</b> {ticker}\n"
-                    f"<b>Entry:</b> Rs {entry_price:.2f}\n"
-                    f"<b>Exit:</b> Rs {current_price:.2f}\n"
-                    f"<b>P&L:</b> Rs {pnl:,.0f} ({pnl_pct:+.2f}%)\n"
-                    f"<b>Days Held:</b> {days_held}\n"
+                    f"{sl_emoji} <b>SWING SL Hit</b>\\n\\n"
+                    f"<b>Ticker:</b> {ticker}\\n"
+                    f"<b>Entry:</b> Rs {entry_price:.2f}\\n"
+                    f"<b>Exit:</b> Rs {current_price:.2f}\\n"
+                    f"<b>P&L:</b> Rs {pnl:,.0f} ({pnl_pct:+.2f}%)\\n"
+                    f"<b>Days Held:</b> {days_held}\\n"
                     f"<b>Qty:</b> {qty}"
-                    + (f"\n\n<i>Profit-lock floor protected +{locked_pct}%</i>" if should_activate and pnl > 0 else "")
+                    + (f"\\n\\n<i>Profit-lock floor protected +{locked_pct}%</i>" if should_activate and pnl > 0 else "")
                 )
 
                 exits_made += 1
@@ -296,6 +295,117 @@ def monitor_positions():
         log(f"📊 Updated stops for {stops_updated} position(s)")
     if exits_made == 0 and profit_locks_activated == 0 and stops_updated == 0:
         log("All positions within TP/SL range")
+
+    # REGIME-BASED CAPITAL REALLOCATION (using existing global_market_filter.py)
+    try:
+        log("\\n💰 Checking freed capital for regime-based re-entry...")
+        available_cash = get_available_cash(STRATEGY)
+        log(f"   Available capital: ₹{available_cash:,.0f}")
+
+        # Only reallocate if we have significant freed capital (> Rs 1L)
+        if available_cash > 100000:
+            log(f"   ✅ Sufficient capital available (> ₹1,00,000)")
+
+            # Check market regime using EXISTING system
+            log(f"   🌍 Checking market regime using global_market_filter...")
+            regime_data = get_current_regime()
+
+            if regime_data:
+                regime = regime_data['regime']
+                score = regime_data['score']
+                
+                # Extract indicator details for display
+                indicators = regime_data.get('indicators', {})
+                nikkei = indicators.get('nikkei', {})
+                hsi = indicators.get('hang_seng', {})
+                sp_futures = indicators.get('sp_futures', {})
+                gold = indicators.get('gold', {})
+                vix = indicators.get('vix', {})
+
+                log(f"   📊 Regime: {regime} (Score: {score:.2f})")
+                log(f"       Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%")
+                log(f"       S&P Futures: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%")
+                log(f"       VIX: {vix.get('value', 'N/A'):.2f}")
+
+                # Calculate capital allocation based on YOUR requirements (75% BULL, 50% NEUTRAL, 0% BEAR)
+                if regime == "BULL":
+                    allocation_pct = 0.75
+                elif regime in ["NEUTRAL", "CAUTION"]:  # Treat CAUTION as NEUTRAL
+                    allocation_pct = 0.50
+                else:  # BEAR
+                    allocation_pct = 0.00
+
+                deployable_capital = available_cash * allocation_pct
+
+                log(f"   💼 Capital allocation: {allocation_pct*100:.0f}% = ₹{deployable_capital:,.0f}")
+
+                if deployable_capital > 0:
+                    log(f"   🔄 Triggering SWING smart entry with regime-based capital allocation...")
+
+                    # Get path to swing_trading_smartentry.py
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    swing_smartentry_script = os.path.join(script_dir, 'swing_trading_smartentry.py')
+
+                    # Get python path
+                    python_path = sys.executable
+
+                    # Send Telegram notification before running
+                    send_telegram_message(
+                        f"🔄 <b>REGIME-BASED RE-ENTRY TRIGGERED (SWING)</b>\\n\\n"
+                        f"💰 Available: ₹{available_cash:,.0f}\\n"
+                        f"🌍 Regime: {regime} (Score: {score:.2f})\\n"
+                        f"📊 Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%\\n"
+                        f"📈 S&P: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%\\n"
+                        f"📉 VIX: {vix.get('value', 'N/A'):.2f}\\n\\n"
+                        f"💼 Deploying: ₹{deployable_capital:,.0f} ({allocation_pct*100:.0f}%)\\n\\n"
+                        f"⏳ Running smart entry..."
+                    )
+
+                    # Run swing_trading_smartentry.py as subprocess
+                    log(f"   🚀 Running: {python_path} {swing_smartentry_script}")
+                    result = subprocess.run(
+                        [python_path, swing_smartentry_script],
+                        capture_output=True,
+                        text=True,
+                        timeout=300  # 5 minute timeout
+                    )
+
+                    if result.returncode == 0:
+                        log(f"   ✅ Smart entry completed successfully")
+                        send_telegram_message(
+                            f"✅ <b>SWING RE-ENTRY COMPLETE</b>\\n\\n"
+                            f"Check position updates above ⬆️"
+                        )
+                    else:
+                        log(f"   ❌ Smart entry failed with exit code {result.returncode}")
+                        log(f"   Error output: {result.stderr}")
+                        send_telegram_message(
+                            f"❌ <b>SWING RE-ENTRY FAILED</b>\\n\\n"
+                            f"Exit code: {result.returncode}\\n"
+                            f"Check logs for details"
+                        )
+                else:
+                    log(f"   ⏸️ BEAR regime detected - skipping re-entry (0% allocation)")
+                    send_telegram_message(
+                        f"🐻 <b>SWING RE-ENTRY SKIPPED</b>\\n\\n"
+                        f"💰 Available: ₹{available_cash:,.0f}\\n"
+                        f"🌍 Regime: {regime} (Score: {score:.2f})\\n"
+                        f"📊 Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%\\n"
+                        f"📈 S&P: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%\\n"
+                        f"📉 VIX: {vix.get('value', 'N/A'):.2f}\\n\\n"
+                        f"⚠️ BEAR market conditions - capital preserved"
+                    )
+
+            else:
+                log(f"   ⚠️ No regime data available (run global_market_filter.py first)")
+
+        else:
+            log(f"   ⏸️ Insufficient capital for re-entry (need > ₹1,00,000)")
+
+    except Exception as e:
+        log(f"   ⚠️ Error during regime-based re-entry check: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     try:
