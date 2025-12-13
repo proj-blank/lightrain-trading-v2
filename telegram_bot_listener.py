@@ -236,39 +236,102 @@ def handle_capital():
         
         result = "<b>💰 Capital Tracker</b>\n\n"
         
-        for strategy in ['DAILY', 'SWING']:
-            cap = get_capital(strategy)
-            current_capital = float(cap['current_trading_capital'])
-            profits = float(cap['total_profits_locked'])
-            losses = float(cap['total_losses'])
-            
-            # Calculate deployed capital (sum of active position values)
+        INITIAL_CAPITAL = 500000
+        
+        for strategy in ["DAILY", "SWING", "THUNDER"]:
             with get_db_cursor() as cur:
+                # Get P&L from positions table
                 cur.execute("""
-                    SELECT COALESCE(SUM(entry_price * quantity), 0) as deployed,
-                           COALESCE(SUM(unrealized_pnl), 0) as unrealized_pnl
+                    SELECT 
+                        COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END), 0) as profits_pos,
+                        COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END), 0) as losses_pos,
+                        COALESCE(SUM(CASE WHEN status = 'HOLD' THEN entry_price * quantity ELSE 0 END), 0) as deployed,
+                        COALESCE(SUM(CASE WHEN status = 'HOLD' THEN unrealized_pnl ELSE 0 END), 0) as unrealized_pnl
                     FROM positions 
-                    WHERE strategy = %s AND status = 'HOLD'
+                    WHERE strategy = %s
                 """, (strategy,))
-                row = cur.fetchone()
-                deployed = float(row['deployed'])
-                unrealized_pnl = float(row['unrealized_pnl']) if row['unrealized_pnl'] else 0
+                pos_row = cur.fetchone()
+                
+                # Get P&L from trades table (only for DAILY/SWING)
+                if strategy in ['DAILY', 'SWING']:
+                    cur.execute("""
+                        SELECT 
+                            COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) as profits_trades,
+                            COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END), 0) as losses_trades
+                        FROM trades
+                        WHERE strategy = %s
+                    """, (strategy,))
+                    trade_row = cur.fetchone()
+                    profits_trades = float(trade_row['profits_trades'])
+                    losses_trades = float(trade_row['losses_trades'])
+                else:
+                    profits_trades = 0
+                    losses_trades = 0
+                
+                # Calculate totals
+                profits = float(pos_row['profits_pos']) + profits_trades
+                losses = float(pos_row['losses_pos']) + losses_trades
+                deployed = float(pos_row['deployed'])
+                unrealized_pnl = float(pos_row['unrealized_pnl'])
+                
+                total_capital = INITIAL_CAPITAL - losses
+                available = total_capital - deployed
+                net_pnl = profits - losses
+                
+                result += f"<b>{strategy}</b>\n"
+                result += f"  Total Capital: ₹{total_capital:,.0f}\n"
+                result += f"  Deployed: ₹{deployed:,.0f}\n"
+                result += f"  Available: ₹{available:,.0f}\n"
+                result += f"  Unrealized P&L: ₹{unrealized_pnl:,.0f}\n"
+                result += f"  Locked Profits: ₹{profits:,.0f}\n"
+                result += f"  Losses: ₹{losses:,.0f}\n"
+                result += f"  Net P&L: ₹{net_pnl:,.0f}\n\n"
+        
+        # Add consolidated summary
+        with get_db_cursor() as cur:
+            # Get totals from positions
+            cur.execute("""
+                SELECT 
+                    COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END), 0) as total_profits_pos,
+                    COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END), 0) as total_losses_pos,
+                    COALESCE(SUM(CASE WHEN status = 'HOLD' THEN entry_price * quantity ELSE 0 END), 0) as total_deployed,
+                    COALESCE(SUM(CASE WHEN status = 'HOLD' THEN unrealized_pnl ELSE 0 END), 0) as total_unrealized
+                FROM positions
+            """)
+            pos_totals = cur.fetchone()
             
-            total_capital = current_capital + deployed
-            available = current_capital
-            
-            result += f"<b>{strategy}</b>\n"
-            result += f"  Total Capital: ₹{total_capital:,.0f}\n"
-            result += f"  Deployed: ₹{deployed:,.0f}\n"
-            result += f"  Available: ₹{available:,.0f}\n"
-            result += f"  Unrealized P&L: ₹{unrealized_pnl:,.0f}\n"
-            result += f"  Locked Profits: ₹{profits:,.0f}\n"
-            result += f"  Losses: ₹{losses:,.0f}\n\n"
+            # Get totals from trades
+            cur.execute("""
+                SELECT 
+                    COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) as total_profits_trades,
+                    COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END), 0) as total_losses_trades
+                FROM trades
+            """)
+            trade_totals = cur.fetchone()
+        
+        grand_profits = float(pos_totals['total_profits_pos']) + float(trade_totals['total_profits_trades'])
+        grand_losses = float(pos_totals['total_losses_pos']) + float(trade_totals['total_losses_trades'])
+        grand_net = grand_profits - grand_losses
+        grand_deployed = float(pos_totals['total_deployed'])
+        grand_unrealized = float(pos_totals['total_unrealized'])
+        grand_available = (1500000 - grand_losses - grand_deployed)
+        
+        result += "<b>═══════════════════════</b>\n"
+        result += "<b>📊 CONSOLIDATED TOTALS</b>\n"
+        result += "<b>═══════════════════════</b>\n"
+        result += f"  Total Capital: ₹{1500000:,.0f}\n"
+        result += f"  Deployed: ₹{grand_deployed:,.0f}\n"
+        result += f"  Available: ₹{grand_available:,.0f}\n"
+        result += f"  Unrealized P&L: ₹{grand_unrealized:,.0f}\n"
+        result += f"  Total Profits: ₹{grand_profits:,.0f}\n"
+        result += f"  Total Losses: ₹{grand_losses:,.0f}\n"
+        result += f"  <b>Net P&L: ₹{grand_net:,.0f}</b>\n"
         
         return result
     except Exception as e:
         import traceback
         return f"❌ Error: {e}\n{traceback.format_exc()[:200]}"
+
 
 def handle_pnl():
     """Dedicated P&L summary report"""
@@ -280,7 +343,7 @@ def handle_pnl():
 
         grand_total_pnl = 0
 
-        for strategy in ['DAILY', 'SWING']:
+        for strategy in ['DAILY', 'SWING', 'THUNDER']:
             # Get positions with category and days held
             with get_db_cursor() as cur:
                 cur.execute("""

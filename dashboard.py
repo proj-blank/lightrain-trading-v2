@@ -90,18 +90,61 @@ def load_recent_trades(days=7):
         return pd.DataFrame(cur.fetchall())
 
 @st.cache_data(ttl=30)
-def load_capital_tracker():
+def load_capital_pnl():
+    """Calculate actual P&L from positions and trades tables"""
     with get_db_cursor() as cur:
+        # Get P&L from positions table
         cur.execute("""
-            SELECT strategy, current_trading_capital,
-                   total_profits_locked, total_losses
-            FROM capital_tracker
+            SELECT
+                strategy,
+                SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END) as profits_positions,
+                SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END) as losses_positions,
+                SUM(CASE WHEN status = 'HOLD' THEN entry_price * quantity ELSE 0 END) as deployed
+            FROM positions
+            WHERE strategy IN ('DAILY', 'SWING', 'THUNDER')
+            GROUP BY strategy
         """)
-        return pd.DataFrame(cur.fetchall())
+        positions_data = pd.DataFrame(cur.fetchall())
+
+        # Get P&L from trades table
+        cur.execute("""
+            SELECT
+                strategy,
+                SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as profits_trades,
+                SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as losses_trades
+            FROM trades
+            WHERE strategy IN ('DAILY', 'SWING')
+            GROUP BY strategy
+        """)
+        trades_data = pd.DataFrame(cur.fetchall())
+
+    # Merge
+    if not trades_data.empty and not positions_data.empty:
+        combined = pd.merge(positions_data, trades_data, on='strategy', how='outer').fillna(0)
+    elif not positions_data.empty:
+        combined = positions_data
+        combined['profits_trades'] = 0
+        combined['losses_trades'] = 0
+    elif not trades_data.empty:
+        combined = trades_data
+        combined['profits_positions'] = 0
+        combined['losses_positions'] = 0
+        combined['deployed'] = 0
+    else:
+        return pd.DataFrame()
+
+    # Calculate totals
+    combined['total_profits'] = combined['profits_positions'] + combined['profits_trades']
+    combined['total_losses'] = combined['losses_positions'] + combined['losses_trades']
+    combined['net_pnl'] = combined['total_profits'] - combined['total_losses']
+
+    return combined[['strategy', 'total_profits', 'total_losses', 'net_pnl', 'deployed']]
 
 @st.cache_data(ttl=30)
 def load_daily_pnl(days=30):
+    """Load daily P&L from both positions and trades tables"""
     with get_db_cursor() as cur:
+        # Get from positions table
         cur.execute("""
             SELECT
                 exit_date as date,
@@ -110,9 +153,33 @@ def load_daily_pnl(days=30):
             WHERE status = 'CLOSED'
               AND exit_date >= CURRENT_DATE - INTERVAL '%s days'
             GROUP BY exit_date
-            ORDER BY exit_date
         """ % days)
-        return pd.DataFrame(cur.fetchall())
+        positions_df = pd.DataFrame(cur.fetchall())
+        
+        # Get from trades table (historical DAILY/SWING)
+        cur.execute("""
+            SELECT
+                DATE(trade_date) as date,
+                SUM(pnl) as daily_pnl
+            FROM trades
+            WHERE DATE(trade_date) >= CURRENT_DATE - INTERVAL '%s days'
+            GROUP BY DATE(trade_date)
+        """ % days)
+        trades_df = pd.DataFrame(cur.fetchall())
+        
+        # Combine both
+        if not positions_df.empty and not trades_df.empty:
+            combined = pd.concat([positions_df, trades_df])
+            result = combined.groupby('date', as_index=False)['daily_pnl'].sum()
+            result = result.sort_values('date')
+        elif not positions_df.empty:
+            result = positions_df.sort_values('date')
+        elif not trades_df.empty:
+            result = trades_df.sort_values('date')
+        else:
+            result = pd.DataFrame()
+        
+        return result
 
 @st.cache_data(ttl=30)
 def load_paper_trades_today():
@@ -128,12 +195,50 @@ def load_paper_trades_today():
 
 @st.cache_data(ttl=30)
 def get_capital_available():
+    """Calculate available capital for each strategy"""
+    INITIAL_CAPITAL = 500000
     with get_db_cursor() as cur:
+        # Get deployed and losses for each strategy
         cur.execute("""
-            SELECT strategy, current_trading_capital
-            FROM capital_tracker
+            SELECT
+                strategy,
+                SUM(CASE WHEN status = 'HOLD' THEN entry_price * quantity ELSE 0 END) as deployed,
+                SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END) as losses_positions
+            FROM positions
+            WHERE strategy IN ('DAILY', 'SWING', 'THUNDER')
+            GROUP BY strategy
         """)
-        return pd.DataFrame(cur.fetchall())
+        pos_data = pd.DataFrame(cur.fetchall())
+
+        # Get losses from trades table
+        cur.execute("""
+            SELECT
+                strategy,
+                SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as losses_trades
+            FROM trades
+            WHERE strategy IN ('DAILY', 'SWING')
+            GROUP BY strategy
+        """)
+        trade_data = pd.DataFrame(cur.fetchall())
+
+    # Merge
+    if not trade_data.empty and not pos_data.empty:
+        combined = pd.merge(pos_data, trade_data, on='strategy', how='outer').fillna(0)
+    elif not pos_data.empty:
+        combined = pos_data
+        combined['losses_trades'] = 0
+    elif not trade_data.empty:
+        combined = trade_data
+        combined['deployed'] = 0
+        combined['losses_positions'] = 0
+    else:
+        return pd.DataFrame()
+
+    # Calculate available = (initial - total_losses) - deployed
+    combined['total_losses'] = combined['losses_positions'] + combined['losses_trades']
+    combined['available'] = INITIAL_CAPITAL - combined['total_losses'] - combined['deployed']
+
+    return combined[['strategy', 'available']]
 
 # Helper functions for new features
 @st.cache_data(ttl=300)
@@ -154,9 +259,42 @@ def get_benchmark_data(days=30):
 
 @st.cache_data(ttl=30)
 def get_period_performance(days):
+    """Get performance from both positions and trades tables"""
     with get_db_cursor() as cur:
-        cur.execute(f"SELECT strategy, SUM(CASE WHEN status = 'CLOSED' THEN realized_pnl ELSE 0 END) as pnl, COUNT(CASE WHEN status = 'CLOSED' THEN 1 END) as trades FROM positions WHERE exit_date >= CURRENT_DATE - INTERVAL '{days} days' GROUP BY strategy")
-        return pd.DataFrame(cur.fetchall())
+        # Get from positions table
+        cur.execute(f"""
+            SELECT strategy, 
+                   SUM(CASE WHEN status = 'CLOSED' THEN realized_pnl ELSE 0 END) as pnl,
+                   COUNT(CASE WHEN status = 'CLOSED' THEN 1 END) as trades
+            FROM positions 
+            WHERE exit_date >= CURRENT_DATE - INTERVAL '{days} days'
+            GROUP BY strategy
+        """)
+        positions_perf = pd.DataFrame(cur.fetchall())
+        
+        # Get from trades table (for historical DAILY/SWING)
+        cur.execute(f"""
+            SELECT strategy,
+                   SUM(pnl) as pnl,
+                   COUNT(*) as trades
+            FROM trades
+            WHERE trade_date >= CURRENT_DATE - INTERVAL '{days} days'
+            GROUP BY strategy
+        """)
+        trades_perf = pd.DataFrame(cur.fetchall())
+        
+        # Combine both
+        if not positions_perf.empty and not trades_perf.empty:
+            combined = pd.concat([positions_perf, trades_perf])
+            result = combined.groupby('strategy', as_index=False).agg({'pnl': 'sum', 'trades': 'sum'})
+        elif not positions_perf.empty:
+            result = positions_perf
+        elif not trades_perf.empty:
+            result = trades_perf
+        else:
+            result = pd.DataFrame(columns=['strategy', 'pnl', 'trades'])
+        
+        return result
 
 # Header
 st.title("📊 LightRain Trading Dashboard")
@@ -177,24 +315,25 @@ with tab1:
     st.header("Portfolio Overview")
 
     # Capital summary
-    capital_df = load_capital_tracker()
+    pnl_df = load_capital_pnl()
 
-    if not capital_df.empty:
+    if not pnl_df.empty:
         col1, col2, col3, col4 = st.columns(4)
 
         total_initial = sum(CAPITAL_INITIAL.values())
-        total_current = capital_df['current_trading_capital'].sum()
-        total_profits = capital_df['total_profits_locked'].sum()
-        total_losses = capital_df['total_losses'].sum()
+        total_profits = pnl_df['total_profits'].sum()
+        total_losses = pnl_df['total_losses'].sum()
+        total_deployed = pnl_df['deployed'].sum() if not pnl_df.empty else 0
+        total_available = (1500000 - total_losses - total_deployed)
 
         with col1:
             st.metric("Total Capital", f"₹{total_initial/100000:.1f}L")
         with col2:
-            st.metric("Available", f"₹{total_current/100000:.1f}L")
+            st.metric("Available", f"₹{total_available/100000:.1f}L")
         with col3:
-            pnl_color = "normal" if total_profits + total_losses >= 0 else "inverse"
-            st.metric("Total P&L", f"₹{(total_profits + total_losses):,.0f}",
-                     delta=f"{((total_profits + total_losses)/total_initial*100):+.2f}%",
+            pnl_color = "normal" if total_profits - total_losses >= 0 else "inverse"
+            st.metric("Total P&L", f"₹{(total_profits - total_losses):,.0f}",
+                     delta=f"{((total_profits - total_losses)/total_initial*100):+.2f}%",
                      delta_color=pnl_color)
         with col4:
             active_pos = load_active_positions()
@@ -226,7 +365,7 @@ with tab1:
         # Chart: Capital allocation
         fig = go.Figure(data=[
             go.Pie(
-                labels=capital_df['strategy'],
+                labels=pnl_df['strategy'],
                 values=list(CAPITAL_INITIAL.values()),
                 hole=0.4,
                 marker=dict(colors=['#1f77b4', '#ff7f0e', '#2ca02c'])
@@ -392,6 +531,7 @@ with tab4:
         fig.update_layout(
             title="Cumulative P&L (Last 30 Days)",
             xaxis_title="Date",
+            xaxis=dict(type="date"),
             yaxis_title="P&L (₹)",
             height=400,
             hovermode='x unified'
@@ -414,6 +554,7 @@ with tab4:
 
         fig2.update_layout(
             title="Daily P&L",
+            xaxis=dict(type="date"),
             xaxis_title="Date",
             yaxis_title="P&L (₹)",
             height=300,
@@ -462,7 +603,7 @@ with tab4:
         # Calculate portfolio returns for comparison
         portfolio_pnl_df = load_daily_pnl(benchmark_days)
 
-        if not portfolio_pnl_df.empty and capital_df is not None and not capital_df.empty:
+        if not portfolio_pnl_df.empty and pnl_df is not None and not pnl_df.empty:
             total_capital = sum(CAPITAL_INITIAL.values())
             total_pnl_period = portfolio_pnl_df['daily_pnl'].sum()
             portfolio_return = (total_pnl_period / total_capital) * 100
@@ -504,6 +645,7 @@ with tab4:
                     ))
 
             fig_benchmark.update_layout(
+            xaxis=dict(type="date"),
                 title="Portfolio vs Benchmarks - Returns Over Time",
                 xaxis_title="Date",
                 yaxis_title="Returns (%)",
