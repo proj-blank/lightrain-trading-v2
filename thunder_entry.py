@@ -12,11 +12,12 @@ from scripts.db_connection import get_db_cursor
 from scripts.telegram_bot import send_telegram_message
 
 # THUNDER Strategy Parameters
-THUNDER_CAPITAL = 400000  # ₹4L allocated
+THUNDER_CAPITAL = 500000  # ₹5L allocated
 MAX_POSITIONS = 6
 MIN_DEXTER_SCORE = 75
 MIN_POSITION_SIZE = 50000  # ₹50K minimum
 MAX_POSITION_SIZE = 120000  # ₹120K maximum
+MAX_SECTOR_ALLOCATION_PCT = 50  # Max 50% of capital per sector
 
 def calculate_position_size(dexter_score, confidence, available_capital):
     """

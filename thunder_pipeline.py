@@ -163,9 +163,9 @@ def run_thunder_pipeline():
     print(f"\n📅 Updating earnings calendar...")
     update_earnings_calendar(universe)
 
-    # Step 3: Find earnings in target window (14-30 days)
-    print(f"\n🎯 Finding earnings in 14-30 day window...")
-    opportunities = get_earnings_in_target_window(min_days=14, max_days=30)
+    # Step 3: Find earnings in target window (25-40 days)
+    print(f"\n🎯 Finding earnings in 25-40 day window...")
+    opportunities = get_earnings_in_target_window(min_days=25, max_days=40)
 
     if opportunities.empty:
         print("\n❌ No earnings in target window")
@@ -206,34 +206,117 @@ def run_thunder_pipeline():
         print(f"         {row['reasoning'][:80]}...")
         print()
 
-    # Step 6: Select diversified positions (2 from each of top 2 sectors)
+    # Step 6: Select diversified positions with existing holdings check
     print(f"\n{'='*70}")
     print("⚡ SECTOR-DIVERSIFIED POSITION SELECTION ⚡")
     print(f"{'='*70}\n")
 
+    THUNDER_CAPITAL = 500000  # ₹5L total capital
+    MAX_SECTOR_ALLOCATION_PCT = 50  # Max 50% per sector
+
+    # Get existing THUNDER holdings with sector info
+    with get_db_cursor() as cur:
+        cur.execute("""
+            SELECT ticker, COUNT(*) as position_count
+            FROM positions
+            WHERE strategy='THUNDER' AND status='HOLD'
+            GROUP BY ticker
+        """)
+        existing_holdings = {row['ticker']: row['position_count'] for row in cur.fetchall()}
+
+        # Get current capital deployed by sector
+        cur.execute("""
+            SELECT ticker, entry_price * quantity as deployed
+            FROM positions
+            WHERE strategy='THUNDER' AND status='HOLD'
+        """)
+        deployed_positions = cur.fetchall()
+
+    # Calculate sector allocations
+    sector_deployed = {}
+    for pos in deployed_positions:
+        ticker = pos['ticker']
+        deployed = float(pos['deployed'])
+
+        # Find sector from df results
+        ticker_sector = df[df['ticker'] == ticker]['sector'].iloc[0] if ticker in df['ticker'].values else 'Unknown'
+        sector_deployed[ticker_sector] = sector_deployed.get(ticker_sector, 0) + deployed
+
+    print(f"📊 Current Capital Deployment by Sector:")
+    for sector, deployed in sorted(sector_deployed.items(), key=lambda x: x[1], reverse=True):
+        pct = (deployed / THUNDER_CAPITAL) * 100
+        print(f"   {sector}: ₹{deployed:,.0f} ({pct:.1f}%)")
+
+    print(f"\n📊 Existing Holdings by Stock:")
+    if existing_holdings:
+        for ticker, count in existing_holdings.items():
+            print(f"   {ticker}: {count} position(s)")
+    else:
+        print(f"   (none)")
+
+    # Filter out stocks we already have 2+ positions in
+    MAX_POSITIONS_PER_STOCK = 2
+    df_filtered = df[df['ticker'].apply(lambda t: existing_holdings.get(t, 0) < MAX_POSITIONS_PER_STOCK)]
+
+    if len(df_filtered) < len(df):
+        excluded = set(df['ticker']) - set(df_filtered['ticker'])
+        print(f"\n⚠️ Excluded {len(excluded)} stock(s) (already have {MAX_POSITIONS_PER_STOCK}+ positions):")
+        for ticker in excluded:
+            print(f"   - {ticker} ({existing_holdings.get(ticker, 0)} positions)")
+
+    if df_filtered.empty:
+        print(f"\n❌ No new candidates after filtering existing holdings")
+        return
+
+    # CRITICAL: Filter out sectors that already have 50%+ capital deployed
+    max_sector_capital = THUNDER_CAPITAL * (MAX_SECTOR_ALLOCATION_PCT / 100)
+    overallocated_sectors = {sector for sector, deployed in sector_deployed.items()
+                              if deployed >= max_sector_capital}
+
+    if overallocated_sectors:
+        print(f"\n🚫 Sectors at MAX allocation ({MAX_SECTOR_ALLOCATION_PCT}% = ₹{max_sector_capital:,.0f}):")
+        for sector in overallocated_sectors:
+            deployed = sector_deployed[sector]
+            pct = (deployed / THUNDER_CAPITAL) * 100
+            print(f"   {sector}: ₹{deployed:,.0f} ({pct:.1f}%) - SKIPPING")
+
+        # Filter out these sectors
+        df_filtered = df_filtered[~df_filtered['sector'].isin(overallocated_sectors)]
+
+        if df_filtered.empty:
+            print(f"\n❌ No candidates after sector allocation filter")
+            print(f"   All available stocks are from overallocated sectors.")
+            print(f"   Waiting for next run to find stocks from other sectors...")
+            return
+
     # Group by sector and get top 2 sectors
-    sector_counts = df['sector'].value_counts()
-    print(f"📊 Sector Distribution:")
+    sector_counts = df_filtered['sector'].value_counts()
+    print(f"\n📊 Sector Distribution (after all filters):")
     for sector, count in sector_counts.items():
-        print(f"   {sector}: {count} candidate(s)")
+        current_deployed = sector_deployed.get(sector, 0)
+        current_pct = (current_deployed / THUNDER_CAPITAL) * 100
+        print(f"   {sector}: {count} candidate(s) | Current: ₹{current_deployed:,.0f} ({current_pct:.1f}%)")
 
     selected = []
+    MAX_PER_SECTOR = 2  # Max 2 positions per sector per run
 
-    # Strategy: 2 from top sector + 2 from second sector = 4 total
+    # Strategy: 2 from top sector + 2 from second sector = 4 total (but respect max 2 per sector)
     if len(sector_counts) >= 2:
         top_sectors = sector_counts.index[:2]  # Top 2 sectors
 
         for sector in top_sectors:
-            sector_df = df[df['sector'] == sector].head(2)  # Top 2 from this sector
+            sector_df = df_filtered[df_filtered['sector'] == sector].head(MAX_PER_SECTOR)
             selected.extend(sector_df.to_dict('records'))
-            print(f"\n✅ Selected 2 from {sector}:")
+            print(f"\n✅ Selected {len(sector_df)} from {sector}:")
             for idx, row in sector_df.iterrows():
                 print(f"   - {row['ticker']:15} (Score: {row['dexter_score']}/100)")
 
     elif len(sector_counts) == 1:
-        # Only 1 sector available, take top 4 from it
-        print(f"\n⚠️ Only 1 sector available, selecting top 4 candidates")
-        selected = df.head(4).to_dict('records')
+        # Only 1 sector available, respect max 2 per sector rule
+        print(f"\n⚠️ Only 1 sector available, selecting max {MAX_PER_SECTOR} candidates (diversification constraint)")
+        selected = df_filtered.head(MAX_PER_SECTOR).to_dict('records')
+        for row in selected:
+            print(f"   - {row['ticker']:15} (Score: {row['dexter_score']}/100)")
 
     else:
         print(f"\n❌ No candidates available")

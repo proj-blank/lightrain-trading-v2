@@ -1,0 +1,97 @@
+THUNDER STRATEGY - SECTOR ALLOCATION RULES
+===========================================
+Updated: December 14, 2025
+
+## CAPITAL ALLOCATION CONSTRAINTS:
+
+1. **Total THUNDER Capital**: ₹5,00,000 (₹5L)
+   
+2. **Maximum Per Sector**: 50% of capital = ₹2,50,000
+   - Prevents over-concentration in any single sector
+   - Example: Technology currently has ₹2,67,000 (53%) → BLOCKED
+
+3. **Maximum Per Stock**: 2 positions max
+   - Prevents over-concentration in single stocks
+
+4. **Maximum Total Positions**: 6 positions
+
+## CURRENT ALLOCATION (as of Dec 14):
+
+Technology Sector: ₹2,67,000 (53.4%) ✅ AT MAX - BLOCKED
+- TCS.NS: 2 positions
+- INFY.NS: 2 positions
+
+Available for new sectors: ₹2,33,000 (46.6%)
+- Banking: ₹0 (0%) ✅ AVAILABLE
+- Energy: ₹0 (0%) ✅ AVAILABLE
+- Consumer Goods: ₹0 (0%) ✅ AVAILABLE
+
+## SELECTION LOGIC:
+
+### Step 1: Sector Allocation Check
+- Calculate current deployment per sector
+- Identify sectors at/above 50% limit
+- SKIP all stocks from overallocated sectors
+
+### Step 2: Stock Position Check
+- Filter out stocks with 2+ existing positions
+- Example: TCS.NS and INFY.NS excluded (have 2 each)
+
+### Step 3: Diversified Selection
+- Select from top 2 available sectors
+- Max 2 positions per sector per run
+- Prefer sector diversity over single-sector concentration
+
+### Step 4: Entry Decision
+IF only overallocated sectors available:
+  → SKIP entry entirely
+  → Wait for next day's run
+  → Message: Waiting for stocks from other sectors...
+
+IF new sectors available:
+  → Enter positions from Banking/Energy/other sectors
+  → Build balanced portfolio
+
+## MONDAY'S EXPECTED BEHAVIOR:
+
+Current State:
+- Technology: ₹2,67,000 (53%) → BLOCKED
+
+Available Opportunities (25-40 days to earnings):
+- Technology: HCLTECH, WIPRO, TECHM, LTTS → ALL SKIPPED
+- Banking: HDFCBANK → ✅ AVAILABLE
+- Energy: RELIANCE → ✅ AVAILABLE
+
+Expected Action:
+✅ SELECT: HDFCBANK (Banking sector)
+✅ SELECT: RELIANCE (Energy sector)
+🚫 SKIP: All Technology stocks (sector at max)
+
+Result:
+- 2 new positions from non-Tech sectors
+- Better sector diversification
+- Total: 6 positions across 3 sectors
+
+## FILES UPDATED:
+
+1. thunder_entry.py
+   - THUNDER_CAPITAL = 500000 (updated from 400000)
+   - MAX_SECTOR_ALLOCATION_PCT = 50
+
+2. thunder_pipeline.py
+   - Calculate sector deployment from positions table
+   - Filter out overallocated sectors (>= 50%)
+   - Display sector allocation percentages
+   - Skip entry if only overallocated sectors available
+
+## KEY PRINCIPLE:
+
+Better to wait for the right sector mix than to over-concentrate in one sector
+
+Technology already at 53% → We wait for Banking/Energy opportunities
+rather than adding more Tech exposure.
+
+═══════════════════════════════════════════════════════════
+Monday Run @ 10:30 AM IST:
+Expected: 2 entries from Banking + Energy (not Technology)
+═══════════════════════════════════════════════════════════
