@@ -233,10 +233,49 @@ def update_capital(strategy: str, pnl: float):
             """, (pnl, abs(pnl), strategy))
 
 def get_available_cash(strategy: str) -> float:
-    """Get available cash for trading"""
-    capital = get_capital(strategy)
-    return float(capital['current_trading_capital']) if capital else 0
+    """
+    Calculate available capital for a strategy
 
+    Formula: (INITIAL_CAPITAL - Total Realized Losses) - Currently Deployed
+
+    Where:
+    - INITIAL_CAPITAL = ₹500,000 per strategy
+    - Total Realized Losses = SUM of all negative P&L from positions + trades
+    - Currently Deployed = SUM(entry_price * quantity) for HOLD positions
+    """
+    INITIAL_CAPITAL = 500000  # ₹5L per strategy
+
+    with get_db_cursor() as cur:
+        # Get total realized losses from closed positions
+        cur.execute("""
+            SELECT COALESCE(SUM(ABS(realized_pnl)), 0) as losses
+            FROM positions
+            WHERE strategy = %s AND status = 'CLOSED' AND realized_pnl < 0
+        """, (strategy,))
+        losses_positions = float(cur.fetchone()['losses'])
+
+        # Get total losses from trades table
+        cur.execute("""
+            SELECT COALESCE(SUM(ABS(pnl)), 0) as losses
+            FROM trades
+            WHERE strategy = %s AND pnl < 0
+        """, (strategy,))
+        losses_trades = float(cur.fetchone()['losses'])
+
+        total_losses = losses_positions + losses_trades
+
+        # Get currently deployed capital (only HOLD positions)
+        cur.execute("""
+            SELECT COALESCE(SUM(entry_price * quantity), 0) as deployed
+            FROM positions
+            WHERE strategy = %s AND status = 'HOLD'
+        """, (strategy,))
+        deployed = float(cur.fetchone()['deployed'])
+
+        # Available = (Initial - Losses) - Deployed
+        available = (INITIAL_CAPITAL - total_losses) - deployed
+
+        return available
 # ==================== CIRCUIT BREAKER ====================
 
 def add_circuit_breaker_hold(ticker: str, strategy: str, user_action: str,
