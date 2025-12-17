@@ -49,16 +49,31 @@ except ImportError:
 from scripts.angelone_price_fetcher import get_live_price
 
 # Configuration
-ACCOUNT_SIZE = 500000  # ₹5L for DAILY strategy
-MAX_DAILY_POSITIONS = 20  # Maximum 20 concurrent DAILY positions
-MAX_POSITION_PCT = 0.30  # 30% max position size (increased for 1% risk sizing)
-MIN_COMBINED_SCORE = 50
+# ACCOUNT_SIZE is the TOTAL INITIAL CAPITAL for DAILY strategy (₹5L)
+# This is NOT the same as available cash (which changes based on losses/deployment)
+ACCOUNT_SIZE = 500000  # ₹5L total capital for DAILY strategy
+print(f"✓ DAILY total capital: ₹{ACCOUNT_SIZE:,}")
+MAX_DAILY_POSITIONS = 10  # Maximum 10 concurrent DAILY positions (better capital efficiency)
+MAX_POSITION_PCT = 0.20  # 20% max position size (₹100k max per position)
+MIN_COMBINED_SCORE = 60  # Increased from 50 for better selection
 USE_ATR_SIZING = True
 MIN_RS_RATING = 60  # Minimum Relative Strength rating for daily trading (1-99 scale)
 MIN_SCORE = 60  # Minimum technical score to qualify for entry
 MAX_HOLD_DAYS = 3  # Maximum calendar days to hold a position (force exit to free capital)
 RISK_PER_TRADE_PCT = 0.01  # 1% risk per trade (Fixed Risk Position Sizing)
 TARGET_RR_RATIO = 1.5  # 1.5:1 Risk:Reward for faster exits (3-day max hold)
+
+# MARKET HOURS CHECK
+from datetime import datetime
+import pytz
+ist = pytz.timezone("Asia/Kolkata")
+now = datetime.now(ist)
+hour, minute = now.hour, now.minute
+if not ((hour == 9 and minute >= 15) or (9 < hour < 15) or (hour == 15 and minute <= 30)):
+    print(f"❌ Market Closed - {now.strftime('%I:%M %p IST')} (Hours: 9:15 AM - 3:30 PM)")
+    sys.exit(0)
+print(f"✅ Market Open - {now.strftime('%I:%M %p IST')}")
+
 STRATEGY = 'DAILY'
 
 print("=" * 70)
@@ -141,63 +156,6 @@ else:
     REGIME_MULTIPLIER = 1.0
     print("⚠️ No market regime data found (run global_market_filter.py at 8:30 AM)")
     print("   Using default 100% position sizing")
-
-# ========== SMART ENTRY VALIDATOR (9:15 AM + 9:30 AM) ==========
-from scripts.smart_entry_validator import (
-    validate_nifty_at_open,
-    analyze_nifty_strength_930
-)
-
-# STEP 1: Check Nifty regime at 9:15 AM
-print("\n🔍 SMART ENTRY: Checking Nifty regime (9:15 AM)...")
-action_915, regime_915, regime_multiplier_915 = validate_nifty_at_open()
-
-if action_915 == "SKIP":
-    print(f"❌ BEAR regime detected: {regime_915}")
-    print(f"   Regime multiplier: {regime_multiplier_915} (0% = SKIP ALL)")
-    send_telegram_message(
-        f"🚫 DAILY Trading Blocked (Smart Entry)\n\n"
-        f"Market Regime (9:15 AM): {regime_915}\n"
-        f"Multiplier: {regime_multiplier_915*100:.0f}%\n\n"
-        f"Smart entry validator says SKIP ALL entries.\n"
-        f"No positions entered today."
-    )
-    sys.exit(0)
-
-print(f"✅ Nifty regime: {regime_915} (multiplier: {regime_multiplier_915*100:.0f}%)")
-
-# STEP 2: Check Nifty opening candle at 9:30 AM
-print("🔍 SMART ENTRY: Analyzing Nifty opening candle (9:30 AM)...")
-candle_data, candle_strength, slice_pct = analyze_nifty_strength_930()
-
-if slice_pct == 0:
-    print(f"❌ STRONG_BEARISH opening candle detected")
-    print(f"   Pattern: {candle_data.get('pattern', 'Unknown')}")
-    print(f"   Slice %: {slice_pct} (0% = SKIP ALL)")
-    send_telegram_message(
-        f"🚫 DAILY Trading Blocked (Smart Entry)\n\n"
-        f"Nifty Opening Candle (9:30 AM): {candle_data.get('pattern', 'STRONG_BEARISH')}\n"
-        f"Strength: {candle_strength:.1f}\n"
-        f"Slice %: {slice_pct}%\n\n"
-        f"Smart entry validator says SKIP ALL entries.\n"
-        f"No positions entered today."
-    )
-    sys.exit(0)
-
-print(f"✅ Nifty candle: {candle_data.get('pattern', 'Unknown')} (strength: {candle_strength:.1f}, slice: {slice_pct}%)")
-
-# STEP 3: Calculate final deployment percentage
-SMART_ENTRY_DEPLOYMENT_PCT = regime_multiplier_915 * (slice_pct / 100)
-
-print(f"\n💡 SMART ENTRY FINAL DEPLOYMENT:")
-print(f"   Regime multiplier: {regime_multiplier_915*100:.0f}%")
-print(f"   Candle slice: {slice_pct}%")
-print(f"   Final deployment: {SMART_ENTRY_DEPLOYMENT_PCT*100:.0f}%")
-
-# Override position sizing with smart entry result
-REGIME_MULTIPLIER = SMART_ENTRY_DEPLOYMENT_PCT
-print(f"   Overriding position sizing with {REGIME_MULTIPLIER*100:.0f}% deployment\n")
-# ========== END SMART ENTRY VALIDATOR ==========
 
 # Load stocks from screened_stocks table
 print("\n📥 Loading stocks from NSE universe...")
@@ -337,6 +295,18 @@ for ticker, df in stock_data.items():
                 'rs_rating': rs_rating
             })
             print(f"{ticker}: {signal} (Score: {score} | RS: {rs_rating})")
+
+        # Save score to screened_stocks table for intraday re-entry
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    UPDATE screened_stocks 
+                    SET score = %s, rs_rating = %s, category = %s
+                    WHERE ticker = %s AND last_updated = CURRENT_DATE
+                """, (int(score), rs_rating, stock_categories.get(ticker, 'Unknown'), ticker))
+        except Exception as e:
+            pass  # Silent fail - don't break execution
+            
 
         # Categorize BUY signals by market cap
         if signal == "BUY":
@@ -520,7 +490,7 @@ if total_candidates > 0:
         total_capital=effective_capital,
         target_allocation={'large': 0.60, 'mid': 0.20, 'micro': 0.20},
         min_position_size=20000,  # Min ₹20K per position
-        max_position_size=150000,  # Max ₹150K per position
+        max_position_size=100000,  # Max ₹100K per position
         min_score=MIN_SCORE,
         min_rs_rating=MIN_RS_RATING
     )
@@ -539,7 +509,7 @@ if total_candidates > 0:
         pre_trade_msg = f"📊 <b>DAILY TRADING - Pre-Entry Summary</b>\n\n"
         pre_trade_msg += f"<b>Market Regime (8:30 AM):</b> {regime_name}\n"
         pre_trade_msg += f"<b>Regime Score:</b> {regime_score:.1f}\n\n"
-        pre_trade_msg += f"<b>Position Sizing:</b> 100% (Full allocation)\n"
+        pre_trade_msg += f"<b>Position Sizing:</b> {int(REGIME_MULTIPLIER*100)}% (Regime adjusted)\n"
         pre_trade_msg += f"<b>Positions to Open:</b> {len(selected_positions)}\n"
         pre_trade_msg += f"<b>Capital Deployment:</b> ₹{ACCOUNT_SIZE:,}\n\n"
         pre_trade_msg += f"⏰ Opening positions now..."
@@ -549,7 +519,6 @@ if total_candidates > 0:
     print(f"\n🔍 PHASE 4: Executing {len(selected_positions)} selected positions...")
 
     # Track available capital
-    available_capital = get_available_cash('DAILY')
     print(f"💰 Available capital: ₹{available_capital:,.0f}")
     positions_entered = 0
     capital_deployed = 0
@@ -602,7 +571,7 @@ if total_candidates > 0:
             continue
 
         # Check if position exceeds max position limit
-        max_position_value = ACCOUNT_SIZE * MAX_POSITION_PCT  # 30% of capital
+        max_position_value = ACCOUNT_SIZE * MAX_POSITION_PCT  # 20% of ₹500k = ₹100k max
         if position_value > max_position_value:
             # Scale down quantity to fit within limit
             qty = int(max_position_value / price)
@@ -610,7 +579,7 @@ if total_candidates > 0:
                 print(f"   ⚠️ SKIPPING {ticker}: Price too high for position limit")
                 continue
             position_value = qty * price
-            print(f"   ⚠️ Position capped at {qty} shares (₹{position_value:,.0f}) due to 30% limit")
+            print(f"   ⚠️ Position capped at {qty} shares (₹{position_value:,.0f}) due to 20% limit (₹100k max)")
 
         # Calculate take profit using Risk:Reward ratio OR fixed profit target
         # Use whichever comes FIRST (min) for quick exits
