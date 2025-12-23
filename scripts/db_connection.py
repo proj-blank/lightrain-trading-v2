@@ -8,7 +8,12 @@ from contextlib import contextmanager
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-load_dotenv("/home/ubuntu/trading/.env")
+from pathlib import Path
+
+# Load .env from the project root (works locally and on AWS)
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(env_path)
+
 from typing import List, Dict, Optional, Tuple
 
 # Database configuration
@@ -91,7 +96,8 @@ def get_deployed_capital(strategy: str = None) -> float:
 def add_position(ticker: str, strategy: str, entry_price: float, quantity: int,
                 stop_loss: float, take_profit: float, category: str,
                 entry_date: str = None,
-                ai_agrees: bool = None, ai_confidence: float = None, ai_reasoning: str = None) -> int:
+                ai_agrees: bool = None, ai_confidence: float = None, ai_reasoning: str = None,
+                trading_mode: str = 'PAPER') -> int:
     """Add new position to portfolio with optional AI validation data"""
     if entry_date is None:
         entry_date = datetime.now().strftime('%Y-%m-%d')
@@ -100,12 +106,12 @@ def add_position(ticker: str, strategy: str, entry_price: float, quantity: int,
         cur.execute("""
             INSERT INTO positions
             (ticker, strategy, status, entry_price, quantity, stop_loss, take_profit, category, entry_date,
-             ai_agrees, ai_confidence, ai_reasoning, ai_analyzed_at)
+             ai_agrees, ai_confidence, ai_reasoning, ai_analyzed_at, trading_mode)
             VALUES (%s, %s, 'HOLD', %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    CASE WHEN %s IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END)
+                    CASE WHEN %s IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END, %s)
             RETURNING id
         """, (ticker, strategy, float(entry_price), int(quantity), float(stop_loss), float(take_profit),
-              category, entry_date, ai_agrees, ai_confidence, ai_reasoning, ai_agrees))
+              category, entry_date, ai_agrees, ai_confidence, ai_reasoning, ai_agrees, trading_mode))
         return cur.fetchone()['id']
 def debit_capital(strategy: str, amount: float):
     """Debit capital when entering a position"""
@@ -164,15 +170,15 @@ def get_position(ticker: str, strategy: str) -> Optional[Dict]:
 
 def log_trade(ticker: str, strategy: str, signal: str, price: float,
               quantity: int, pnl: float = None, notes: str = "",
-              category: str = None):
+              category: str = None, trading_mode: str = 'PAPER'):
     """Log a trade to the database"""
     with get_db_cursor() as cur:
         cur.execute("""
             INSERT INTO trades
-            (ticker, strategy, signal, price, quantity, pnl, notes, category)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (ticker, strategy, signal, price, quantity, pnl, notes, category, trading_mode)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-        """, (ticker, strategy, signal, price, quantity, pnl, notes, category))
+        """, (ticker, strategy, signal, price, quantity, pnl, notes, category, trading_mode))
         return cur.fetchone()['id']
 
 def get_trades(strategy: str = None, start_date: str = None,
@@ -232,34 +238,45 @@ def update_capital(strategy: str, pnl: float):
                 WHERE strategy = %s
             """, (pnl, abs(pnl), strategy))
 
-def get_available_cash(strategy: str) -> float:
+def get_available_cash(strategy: str, trading_mode: str = 'PAPER') -> float:
     """
     Calculate available capital for a strategy
 
-    Formula: (INITIAL_CAPITAL - Total Realized Losses) - Currently Deployed
+    Formula: (Initial Capital - Realized Losses) - Currently Deployed
+
+    IMPORTANT: Profits are LOCKED and never redeployed. Only losses reduce the capital pool.
 
     Where:
-    - INITIAL_CAPITAL = ₹500,000 per strategy
-    - Total Realized Losses = SUM of all negative P&L from positions + trades
+    - INITIAL_CAPITAL = From capital_tracker table (₹500K for PAPER, ₹1 for LIVE)
+    - Realized Losses = SUM of all negative P&L from positions + trades (permanent reduction)
+    - Realized Profits = LOCKED AWAY (not available for redeployment)
     - Currently Deployed = SUM(entry_price * quantity) for HOLD positions
+    - trading_mode = 'PAPER' (default) or 'LIVE'
     """
-    INITIAL_CAPITAL = 500000  # ₹5L per strategy
-
     with get_db_cursor() as cur:
+        # Get initial capital from capital_tracker
+        cur.execute("""
+            SELECT initial_capital
+            FROM capital_tracker
+            WHERE strategy = %s AND trading_mode = %s
+        """, (strategy, trading_mode))
+        result = cur.fetchone()
+        INITIAL_CAPITAL = float(result['initial_capital']) if result else 500000
+
         # Get total realized losses from closed positions
         cur.execute("""
             SELECT COALESCE(SUM(ABS(realized_pnl)), 0) as losses
             FROM positions
-            WHERE strategy = %s AND status = 'CLOSED' AND realized_pnl < 0
-        """, (strategy,))
+            WHERE strategy = %s AND status = 'CLOSED' AND realized_pnl < 0 AND trading_mode = %s
+        """, (strategy, trading_mode))
         losses_positions = float(cur.fetchone()['losses'])
 
         # Get total losses from trades table
         cur.execute("""
             SELECT COALESCE(SUM(ABS(pnl)), 0) as losses
             FROM trades
-            WHERE strategy = %s AND pnl < 0
-        """, (strategy,))
+            WHERE strategy = %s AND pnl < 0 AND trading_mode = %s
+        """, (strategy, trading_mode))
         losses_trades = float(cur.fetchone()['losses'])
 
         total_losses = losses_positions + losses_trades
@@ -268,12 +285,15 @@ def get_available_cash(strategy: str) -> float:
         cur.execute("""
             SELECT COALESCE(SUM(entry_price * quantity), 0) as deployed
             FROM positions
-            WHERE strategy = %s AND status = 'HOLD'
-        """, (strategy,))
+            WHERE strategy = %s AND status = 'HOLD' AND trading_mode = %s
+        """, (strategy, trading_mode))
         deployed = float(cur.fetchone()['deployed'])
 
-        # Available = (Initial - Losses) - Deployed
-        available = (INITIAL_CAPITAL - total_losses) - deployed
+        # Trading Capital = Initial - Losses (profits are locked and excluded)
+        trading_capital = INITIAL_CAPITAL - total_losses
+
+        # Available = Trading Capital - Deployed
+        available = trading_capital - deployed
 
         return available
 # ==================== CIRCUIT BREAKER ====================

@@ -36,6 +36,10 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+# Session state for trading mode
+if 'trading_mode' not in st.session_state:
+    st.session_state.trading_mode = 'PAPER'
+
 # Capital allocation (initial)
 CAPITAL_INITIAL = {
     "DAILY": 500000,
@@ -46,7 +50,7 @@ CAPITAL_INITIAL = {
 
 # Cache data for 30 seconds
 @st.cache_data(ttl=30)
-def load_portfolio_summary():
+def load_portfolio_summary(trading_mode):
     with get_db_cursor() as cur:
         cur.execute("""
             SELECT
@@ -55,12 +59,13 @@ def load_portfolio_summary():
                 SUM(CASE WHEN status = 'HOLD' THEN unrealized_pnl ELSE 0 END) as unrealized_pnl,
                 SUM(CASE WHEN status = 'HOLD' THEN entry_price * quantity ELSE 0 END) as invested
             FROM positions
+            WHERE trading_mode = %s
             GROUP BY strategy
-        """)
+        """, (trading_mode,))
         return pd.DataFrame(cur.fetchall())
 
 @st.cache_data(ttl=30)
-def load_active_positions():
+def load_active_positions(trading_mode):
     with get_db_cursor() as cur:
         cur.execute("""
             SELECT
@@ -69,28 +74,30 @@ def load_active_positions():
                 CURRENT_DATE - entry_date as days_held
             FROM positions
             WHERE status = 'HOLD'
+              AND trading_mode = %s
             ORDER BY entry_date DESC
-        """)
+        """, (trading_mode,))
         return pd.DataFrame(cur.fetchall())
 
 @st.cache_data(ttl=30)
-def load_recent_trades(days=7):
+def load_recent_trades(trading_mode, days=7):
     with get_db_cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT
                 ticker, strategy, entry_date, exit_date, entry_price,
                 current_price as exit_price, quantity, realized_pnl,
                 (exit_date - entry_date) as days_held
             FROM positions
             WHERE status = 'CLOSED'
-              AND exit_date >= CURRENT_DATE - INTERVAL '%s days'
+              AND trading_mode = %s
+              AND exit_date >= CURRENT_DATE - INTERVAL '{days} days'
             ORDER BY exit_date DESC
             LIMIT 20
-        """ % days)
+        """, (trading_mode,))
         return pd.DataFrame(cur.fetchall())
 
 @st.cache_data(ttl=30)
-def load_capital_pnl():
+def load_capital_pnl(trading_mode):
     """Calculate actual P&L from positions and trades tables"""
     with get_db_cursor() as cur:
         # Get P&L from positions table
@@ -102,8 +109,9 @@ def load_capital_pnl():
                 SUM(CASE WHEN status = 'HOLD' THEN entry_price * quantity ELSE 0 END) as deployed
             FROM positions
             WHERE strategy IN ('DAILY', 'SWING', 'THUNDER')
+              AND trading_mode = %s
             GROUP BY strategy
-        """)
+        """, (trading_mode,))
         positions_data = pd.DataFrame(cur.fetchall())
 
         # Get P&L from trades table
@@ -114,8 +122,9 @@ def load_capital_pnl():
                 SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as losses_trades
             FROM trades
             WHERE strategy IN ('DAILY', 'SWING')
+              AND trading_mode = %s
             GROUP BY strategy
-        """)
+        """, (trading_mode,))
         trades_data = pd.DataFrame(cur.fetchall())
 
     # Merge
@@ -141,30 +150,32 @@ def load_capital_pnl():
     return combined[['strategy', 'total_profits', 'total_losses', 'net_pnl', 'deployed']]
 
 @st.cache_data(ttl=30)
-def load_daily_pnl(days=30):
+def load_daily_pnl(trading_mode, days=30):
     """Load daily P&L from both positions and trades tables"""
     with get_db_cursor() as cur:
         # Get from positions table
-        cur.execute("""
+        cur.execute(f"""
             SELECT
                 exit_date as date,
                 SUM(realized_pnl) as daily_pnl
             FROM positions
             WHERE status = 'CLOSED'
-              AND exit_date >= CURRENT_DATE - INTERVAL '%s days'
+              AND trading_mode = %s
+              AND exit_date >= CURRENT_DATE - INTERVAL '{days} days'
             GROUP BY exit_date
-        """ % days)
+        """, (trading_mode,))
         positions_df = pd.DataFrame(cur.fetchall())
-        
+
         # Get from trades table (historical DAILY/SWING)
-        cur.execute("""
+        cur.execute(f"""
             SELECT
                 DATE(trade_date) as date,
                 SUM(pnl) as daily_pnl
             FROM trades
-            WHERE DATE(trade_date) >= CURRENT_DATE - INTERVAL '%s days'
+            WHERE trading_mode = %s
+              AND DATE(trade_date) >= CURRENT_DATE - INTERVAL '{days} days'
             GROUP BY DATE(trade_date)
-        """ % days)
+        """, (trading_mode,))
         trades_df = pd.DataFrame(cur.fetchall())
         
         # Combine both
@@ -182,19 +193,7 @@ def load_daily_pnl(days=30):
         return result
 
 @st.cache_data(ttl=30)
-def load_paper_trades_today():
-    with get_db_cursor() as cur:
-        cur.execute("""
-            SELECT ticker, strategy, stock_pattern, current_price,
-                   limit_price, would_enter, reason
-            FROM paper_trades
-            WHERE trade_date = CURRENT_DATE
-            ORDER BY strategy, ticker
-        """)
-        return pd.DataFrame(cur.fetchall())
-
-@st.cache_data(ttl=30)
-def get_capital_available():
+def get_capital_available(trading_mode):
     """Calculate available capital for each strategy"""
     INITIAL_CAPITAL = 500000
     with get_db_cursor() as cur:
@@ -206,8 +205,9 @@ def get_capital_available():
                 SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END) as losses_positions
             FROM positions
             WHERE strategy IN ('DAILY', 'SWING', 'THUNDER')
+              AND trading_mode = %s
             GROUP BY strategy
-        """)
+        """, (trading_mode,))
         pos_data = pd.DataFrame(cur.fetchall())
 
         # Get losses from trades table
@@ -217,8 +217,9 @@ def get_capital_available():
                 SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as losses_trades
             FROM trades
             WHERE strategy IN ('DAILY', 'SWING')
+              AND trading_mode = %s
             GROUP BY strategy
-        """)
+        """, (trading_mode,))
         trade_data = pd.DataFrame(cur.fetchall())
 
     # Merge
@@ -258,20 +259,21 @@ def get_benchmark_data(days=30):
     return result
 
 @st.cache_data(ttl=30)
-def get_period_performance(days):
+def get_period_performance(trading_mode, days):
     """Get performance from both positions and trades tables"""
     with get_db_cursor() as cur:
         # Get from positions table
         cur.execute(f"""
-            SELECT strategy, 
+            SELECT strategy,
                    SUM(CASE WHEN status = 'CLOSED' THEN realized_pnl ELSE 0 END) as pnl,
                    COUNT(CASE WHEN status = 'CLOSED' THEN 1 END) as trades
-            FROM positions 
+            FROM positions
             WHERE exit_date >= CURRENT_DATE - INTERVAL '{days} days'
+              AND trading_mode = %s
             GROUP BY strategy
-        """)
+        """, (trading_mode,))
         positions_perf = pd.DataFrame(cur.fetchall())
-        
+
         # Get from trades table (for historical DAILY/SWING)
         cur.execute(f"""
             SELECT strategy,
@@ -279,8 +281,9 @@ def get_period_performance(days):
                    COUNT(*) as trades
             FROM trades
             WHERE trade_date >= CURRENT_DATE - INTERVAL '{days} days'
+              AND trading_mode = %s
             GROUP BY strategy
-        """)
+        """, (trading_mode,))
         trades_perf = pd.DataFrame(cur.fetchall())
         
         # Combine both
@@ -297,17 +300,25 @@ def get_period_performance(days):
         return result
 
 # Header
-st.title("📊 LightRain Trading Dashboard")
-st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# Trading Mode Toggle
+col1, col2, col3 = st.columns([2, 1, 1])
+with col1:
+    st.title("📊 LightRain Trading Dashboard")
+with col2:
+    mode = st.radio("Mode", options=['PAPER', 'LIVE'], horizontal=True)
+    st.session_state.trading_mode = mode
+with col3:
+    if st.button("🔄 Refresh", key="refresh_top", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+mode_emoji = "📝" if st.session_state.trading_mode == 'PAPER' else "💵"
+st.markdown(f"### {mode_emoji} {st.session_state.trading_mode} Mode")
 
 # Auto-refresh every 30 seconds
-if st.button("🔄 Refresh", key="refresh_top"):
-    st.cache_data.clear()
-    st.rerun()
-
 # Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📈 Overview", "💼 Positions", "📜 Trades", "📊 Performance", "📄 Paper Trades"
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📈 Overview", "💼 Positions", "📜 Trades", "📊 Performance"
 ])
 
 # TAB 1: Overview
@@ -315,7 +326,7 @@ with tab1:
     st.header("Portfolio Overview")
 
     # Capital summary
-    pnl_df = load_capital_pnl()
+    pnl_df = load_capital_pnl(st.session_state.trading_mode)
 
     if not pnl_df.empty:
         col1, col2, col3, col4 = st.columns(4)
@@ -336,14 +347,14 @@ with tab1:
                      delta=f"{((total_profits - total_losses)/total_initial*100):+.2f}%",
                      delta_color=pnl_color)
         with col4:
-            active_pos = load_active_positions()
+            active_pos = load_active_positions(st.session_state.trading_mode)
             st.metric("Active Positions", len(active_pos))
 
     st.divider()
 
     # Strategy breakdown
     st.subheader("Strategy Breakdown")
-    portfolio = load_portfolio_summary()
+    portfolio = load_portfolio_summary(st.session_state.trading_mode)
 
     if not portfolio.empty:
         for _, row in portfolio.iterrows():
@@ -398,7 +409,7 @@ with tab1:
             else:
                 selected_days = {"Today (1 day)": 1, "Week (7 days)": 7, "Month (30 days)": 30}.get(period_option, 7)
 
-        period_perf = get_period_performance(selected_days)
+        period_perf = get_period_performance(st.session_state.trading_mode, selected_days)
 
         if not period_perf.empty:
             st.write(f"**Performance for last {selected_days} day(s)**")
@@ -434,7 +445,7 @@ with tab1:
 with tab2:
     st.header("Active Positions")
 
-    positions = load_active_positions()
+    positions = load_active_positions(st.session_state.trading_mode)
 
     if positions.empty:
         st.info("No active positions")
@@ -471,7 +482,7 @@ with tab3:
     st.header("Recent Trades")
 
     days = st.slider("Days to show", 1, 30, 7)
-    trades = load_recent_trades(days)
+    trades = load_recent_trades(st.session_state.trading_mode, days)
 
     if trades.empty:
         st.info("No trades in selected period")
@@ -512,7 +523,7 @@ with tab3:
 with tab4:
     st.header("Performance Charts")
 
-    pnl_df = load_daily_pnl(30)
+    pnl_df = load_daily_pnl(st.session_state.trading_mode, 30)
 
     if not pnl_df.empty:
         # Cumulative P&L
@@ -601,7 +612,7 @@ with tab4:
             st.metric("Gold", f"{gold_return:.2f}%")
 
         # Calculate portfolio returns for comparison
-        portfolio_pnl_df = load_daily_pnl(benchmark_days)
+        portfolio_pnl_df = load_daily_pnl(st.session_state.trading_mode, benchmark_days)
 
         if not portfolio_pnl_df.empty and pnl_df is not None and not pnl_df.empty:
             total_capital = sum(CAPITAL_INITIAL.values())
@@ -665,49 +676,7 @@ with tab4:
         else:
             st.info("Insufficient portfolio data for comparison chart")
 
-# TAB 5: Paper Trades
-with tab5:
-    st.header("Paper Trades (Smart Entry)")
-
-    paper = load_paper_trades_today()
-
-    if paper.empty:
-        st.info("No paper trades logged today. Check back after 9:30 AM.")
-    else:
-        st.subheader("What Smart Entry Would Do Today")
-
-        # Summary
-        total_paper = len(paper)
-        would_enter = paper[paper['would_enter'] == True]
-        would_skip = paper[paper['would_enter'] == False]
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Analyzed", total_paper)
-        with col2:
-            st.metric("Would Enter", len(would_enter))
-        with col3:
-            st.metric("Would Skip", len(would_skip))
-
-        st.divider()
-
-        # Show entries
-        if not would_enter.empty:
-            st.subheader("✅ Would Enter")
-            st.dataframe(
-                would_enter[['ticker', 'strategy', 'stock_pattern', 'current_price', 'limit_price', 'reason']],
-                use_container_width=True,
-                hide_index=True
-            )
-
-        if not would_skip.empty:
-            st.subheader("❌ Would Skip")
-            st.dataframe(
-                would_skip[['ticker', 'strategy', 'stock_pattern', 'reason']],
-                use_container_width=True,
-                hide_index=True
-            )
 
 # Footer
 st.divider()
-st.caption("LightRain Trading System | Auto-refresh every 30s")
+st.caption(f"LightRain Trading | {st.session_state.trading_mode} Mode | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
