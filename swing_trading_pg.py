@@ -34,7 +34,7 @@ from scripts.db_connection import (
     get_active_positions, add_position, close_position, log_trade,
     get_capital, update_capital, get_available_cash,
     is_position_on_hold, add_circuit_breaker_hold,
-    get_db_cursor, debit_capital, credit_capital
+    get_db_cursor, debit_capital, credit_capital, get_deployed_capital
 )
 
 # Trading logic imports
@@ -49,7 +49,8 @@ from scripts.angelone_price_fetcher import get_live_price
 import yfinance as yf
 
 # Configuration
-ACCOUNT_SIZE = 500000  # ₹5 Lakh for SWING strategy
+# Use available cash (not deprecated capital_tracker)
+ACCOUNT_SIZE = 500000  # Initial capital for allocation calculations
 MAX_SWING_POSITIONS = 10  # Maximum 10 concurrent SWING positions
 MAX_POSITION_PCT = 0.14  # 14% per position
 MIN_SIGNAL_SCORE = 65  # Raised from 60 to be more selective
@@ -58,7 +59,55 @@ TARGET_PROFIT_PCT = 0.04  # 4%
 STOP_LOSS_PCT = 0.02  # 2%
 TRAILING_STOP_PCT = 0.01  # 1%
 MAX_HOLD_DAYS = 15
+
+# MARKET HOURS AND HOLIDAY CHECK
+from datetime import datetime
+import pytz
+import yfinance as yf
+
+def is_market_open():
+    """Check if Indian stock market (NSE) is currently open"""
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist)
+    hour, minute = now.hour, now.minute
+    
+    # Time check
+    market_hours_open = (hour == 9 and minute >= 15) or (9 < hour < 15) or (hour == 15 and minute <= 30)
+    
+    if not market_hours_open:
+        return False, f"Outside market hours: {now.strftime('%I:%M %p IST')} (Market: 9:15 AM - 3:30 PM)"
+    
+    # Holiday check - fetch NIFTY data to see if market is actually open
+    try:
+        nifty = yf.Ticker("^NSEI")
+        hist = nifty.history(period="2d")
+        
+        if hist.empty:
+            return False, "No market data available (likely holiday)"
+        
+        # Check if today's date appears in the data
+        today_str = now.strftime('%Y-%m-%d')
+        dates_in_data = hist.index.strftime('%Y-%m-%d').tolist()
+        
+        if today_str not in dates_in_data:
+            last_day = dates_in_data[-1] if dates_in_data else 'unknown'
+            return False, f"Market holiday detected (last trading day: {last_day})"
+        
+        return True, f"Market open - {now.strftime('%I:%M %p IST')}"
+    
+    except Exception as e:
+        # On error, assume market is open (fail-safe for connectivity issues)
+        print(f"⚠️ Warning: Could not verify holiday status ({e}). Proceeding with caution.")
+        return True, f"Market hours OK (holiday check failed)"
+
+is_open, reason = is_market_open()
+if not is_open:
+    print(f"❌ Market Closed - {reason}")
+    sys.exit(0)
+print(f"✅ {reason}")
+
 STRATEGY = 'SWING'
+TRADING_MODE = os.getenv('TRADING_MODE', 'PAPER')  # PAPER (default) or LIVE
 
 # Log file
 SWING_LOG_FILE = 'logs/swing_trading.log'
@@ -116,7 +165,8 @@ def log_trade_record(trade_data):
         quantity=int(trade_data['Qty']),
         pnl=float(trade_data.get('PnL', 0)),
         notes=trade_data.get('Reason', ''),
-        category=trade_data.get('Category', None)
+        category=trade_data.get('Category', None),
+        trading_mode=TRADING_MODE
     )
 
 def get_trading_capital():
@@ -127,7 +177,7 @@ def get_trading_capital():
     return ACCOUNT_SIZE
 
 def get_cash():
-    """Calculate available cash from database"""
+    """Calculate available cash using actual positions + trades data"""
     return get_available_cash(STRATEGY)
 
 def check_exits(portfolio, stock_data, current_date):
@@ -196,10 +246,10 @@ def check_exits(portfolio, stock_data, current_date):
 
             # Credit back the original investment
             original_investment = entry_price * qty
-            credit_capital(STRATEGY, original_investment)
+            credit_capital(STRATEGY, original_investment, trading_mode)
 
             # Update capital with P&L
-            update_capital(STRATEGY, pnl)
+            update_capital(STRATEGY, pnl, trading_mode)
 
             portfolio = portfolio[portfolio['Ticker'] != ticker]
             continue
@@ -267,10 +317,10 @@ def check_exits(portfolio, stock_data, current_date):
 
             # Credit back the original investment
             original_investment = entry_price * qty
-            credit_capital(STRATEGY, original_investment)
+            credit_capital(STRATEGY, original_investment, trading_mode)
 
             # Update capital with P&L
-            update_capital(STRATEGY, pnl)
+            update_capital(STRATEGY, pnl, trading_mode)
 
             portfolio = portfolio[portfolio['Ticker'] != ticker]
             continue
@@ -368,10 +418,10 @@ def check_exits(portfolio, stock_data, current_date):
 
             # Credit back the original investment
             original_investment = entry_price * qty
-            credit_capital(STRATEGY, original_investment)
+            credit_capital(STRATEGY, original_investment, trading_mode)
 
             # Update capital with P&L
-            update_capital(STRATEGY, pnl)
+            update_capital(STRATEGY, pnl, trading_mode)
 
             # Remove from portfolio
             portfolio = portfolio[portfolio['Ticker'] != ticker]
@@ -550,9 +600,23 @@ def smart_scan_with_allocation(portfolio, current_date, cash, regime_multiplier=
 
     for position in selected_positions_list:
         ticker = position['ticker']
+
+        # Check for existing position in SAME strategy (prevent duplicate entries)
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT entry_date
+                FROM positions
+                WHERE ticker = %s AND strategy = %s AND status = 'HOLD'
+            """, (ticker, STRATEGY))
+            existing = cur.fetchone()
+            
+            if existing:
+                log(f"  ⏭️  SKIPPING {ticker}: Already holding in {STRATEGY} (since {existing['entry_date']})")
+                continue
+
         yahoo_price = float(position["price"])  # Ensure float conversion
         score = position['score']
-        capital_allocated = position['capital_allocated']
+        capital_allocated = position.get("position_size") or position.get("capital_allocated")
         df = position['df']
 
         # Get live price from AngelOne (with Yahoo fallback)
@@ -645,6 +709,14 @@ def smart_scan_with_allocation(portfolio, current_date, cash, regime_multiplier=
             log(f"  ⚠️ AI validation failed: {ai_error}")
             # Continue with default values
 
+        # VALIDATE: Check if we have enough cash before entering
+        position_cost = price * qty
+        current_cash = get_cash()
+
+        if position_cost > current_cash:
+            log(f"  ⚠️ SKIPPED: {ticker} - Position cost (₹{position_cost:,.0f}) exceeds available cash (₹{current_cash:,.0f})")
+            continue
+
         # Add to database with AI validation data
         try:
             add_position(
@@ -658,12 +730,12 @@ def smart_scan_with_allocation(portfolio, current_date, cash, regime_multiplier=
                 entry_date=current_date.strftime('%Y-%m-%d'),
                 ai_agrees=ai_agrees,
                 ai_confidence=ai_confidence,
-                ai_reasoning=ai_reasoning
+                ai_reasoning=ai_reasoning,
+                trading_mode=TRADING_MODE
             )
 
             # Debit capital for this position
-            position_cost = price * qty
-            debit_capital(STRATEGY, position_cost)
+            debit_capital(STRATEGY, position_cost, TRADING_MODE)
 
         except Exception as e:
             log(f"  ❌ Failed to add position to database: {e}")
@@ -766,10 +838,47 @@ def send_telegram_summary(portfolio, exits, entries, total_pnl):
 
             msg += "\n"
 
-        # Summary
-        cash = get_cash()
-        account_size = get_trading_capital()
-        invested = account_size - cash
+        # Summary (using accurate capital calculation)
+        # Get initial capital from capital_tracker
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT initial_capital FROM capital_tracker
+                WHERE strategy = %s AND trading_mode = %s
+            """, (STRATEGY, 'PAPER'))
+            result = cur.fetchone()
+            initial_capital = float(result['initial_capital']) if result else 500000
+        
+        # Deployed = sum of all open positions
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(entry_price * quantity), 0) as deployed
+                FROM positions
+                WHERE strategy = %s AND status = 'HOLD' AND trading_mode = 'PAPER'
+            """, (STRATEGY,))
+            deployed = float(cur.fetchone()['deployed'])
+        
+        # Realized losses only (profits are locked, not redeployed)
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(realized_pnl), 0) as realized_losses
+                FROM positions
+                WHERE strategy = %s AND status = 'CLOSED' AND realized_pnl < 0 AND trading_mode = 'PAPER'
+            """, (STRATEGY,))
+            realized_losses = float(cur.fetchone()['realized_losses'])  # negative number
+        
+        # Unrealized losses from open positions
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(unrealized_pnl), 0) as unrealized_losses
+                FROM positions
+                WHERE strategy = %s AND status = 'HOLD' AND trading_mode = 'PAPER' AND unrealized_pnl < 0
+            """, (STRATEGY,))
+            unrealized_losses = float(cur.fetchone()['unrealized_losses'])  # negative number
+        
+        # Available cash = Initial - Deployed - Realized Losses - Unrealized Losses
+        cash = initial_capital - deployed - realized_losses - unrealized_losses
+        invested = deployed
+        
         msg += f"*Portfolio:*\n"
         msg += f"💰 Cash: ₹{cash:,.0f}\n"
         msg += f"📊 Invested: ₹{invested:,.0f}\n"
@@ -830,60 +939,6 @@ def main():
         except Exception as e:
             log(f"⚠️ Error reading halt file: {e}")
             # Continue trading on error to be safe
-
-
-    # ========== SMART ENTRY VALIDATOR (9:15 AM + 9:30 AM) ==========
-    from scripts.smart_entry_validator import (
-        validate_nifty_at_open,
-        analyze_nifty_strength_930
-    )
-
-    # STEP 1: Check Nifty regime at 9:15 AM
-    log("\n🔍 SMART ENTRY: Checking Nifty regime (9:15 AM)...")
-    action_915, regime_915, regime_multiplier_915 = validate_nifty_at_open()
-
-    if action_915 == "SKIP":
-        log(f"❌ BEAR regime detected: {regime_915}")
-        log(f"   Regime multiplier: {regime_multiplier_915} (0% = SKIP ALL)")
-        send_telegram_message(
-            f"🚫 SWING Trading Blocked (Smart Entry)\n\n"
-            f"Market Regime (9:15 AM): {regime_915}\n"
-            f"Multiplier: {regime_multiplier_915*100:.0f}%\n\n"
-            f"Smart entry validator says SKIP ALL entries.\n"
-            f"No positions entered today."
-        )
-        return
-
-    log(f"✅ Nifty regime: {regime_915} (multiplier: {regime_multiplier_915*100:.0f}%)")
-
-    # STEP 2: Check Nifty opening candle at 9:30 AM
-    log("🔍 SMART ENTRY: Analyzing Nifty opening candle (9:30 AM)...")
-    candle_data, candle_strength, slice_pct = analyze_nifty_strength_930()
-
-    if slice_pct == 0:
-        log(f"❌ STRONG_BEARISH opening candle detected")
-        log(f"   Pattern: {candle_data.get('pattern', 'Unknown')}")
-        log(f"   Slice %: {slice_pct} (0% = SKIP ALL)")
-        send_telegram_message(
-            f"🚫 SWING Trading Blocked (Smart Entry)\n\n"
-            f"Nifty Opening Candle (9:30 AM): {candle_data.get('pattern', 'STRONG_BEARISH')}\n"
-            f"Strength: {candle_strength:.1f}\n"
-            f"Slice %: {slice_pct}%\n\n"
-            f"Smart entry validator says SKIP ALL entries.\n"
-            f"No positions entered today."
-        )
-        return
-
-    log(f"✅ Nifty candle: {candle_data.get('pattern', 'Unknown')} (strength: {candle_strength:.1f}, slice: {slice_pct}%)")
-
-    # STEP 3: Calculate final deployment percentage
-    SMART_ENTRY_DEPLOYMENT_PCT = regime_multiplier_915 * (slice_pct / 100)
-
-    log(f"\n💡 SMART ENTRY FINAL DEPLOYMENT:")
-    log(f"   Regime multiplier: {regime_multiplier_915*100:.0f}%")
-    log(f"   Candle slice: {slice_pct}%")
-    log(f"   Final deployment: {SMART_ENTRY_DEPLOYMENT_PCT*100:.0f}%")
-    # ========== END SMART ENTRY VALIDATOR ==========
 
     # 🌍 Global Market Regime Check
     from global_market_filter import get_current_regime

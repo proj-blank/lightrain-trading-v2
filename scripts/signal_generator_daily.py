@@ -1,7 +1,7 @@
-# scripts/signal_generator_daily.py
+# scripts/signal_generator_daily_with_guards.py
 """
-Daily trading signal generator with BALANCED weights.
-Uses original balanced distribution - better for daily/intraday timeframes.
+Daily trading signal generator with KNIFE GUARDS + BALANCED weights.
+Added pre-filters to avoid catching falling knives.
 """
 
 import pandas as pd
@@ -15,9 +15,77 @@ from scripts.signal_generator_v2 import (
 )
 
 
-def generate_signal_daily(df, min_score=60):
+def check_knife_guards(df):
     """
-    Generate daily trading signals with BALANCED indicator weights.
+    KNIFE GUARDS: Pre-filter to avoid catching falling knives
+    
+    Based on backtest results (2026-01-12):
+    - Tested 19 different guard combinations
+    - Optimal: 50SMA + Vol20 (1.0x threshold)
+    - Results: 33.3% -> 45.8% win rate (+12.5%)
+    - Results: Rs 8,468 -> Rs 13,379 P&L (+58%)
+    
+    Guards:
+    1. Price must be ABOVE 50-day SMA (short-term trend filter)
+    2. Volume must be ABOVE 20-day average (institutional confirmation)
+    
+    Returns:
+        tuple: (passed: bool, reason: str, guard_details: dict)
+    """
+    if df is None or df.empty or len(df) < 60:
+        return False, 'Insufficient data', {}
+    
+    try:
+        # Calculate indicators
+        df['SMA_50'] = df['Close'].rolling(50).mean()
+        df['Volume_SMA_20'] = df['Volume'].rolling(20).mean()
+        
+        # Current values
+        current_price = df['Close'].iloc[-1]
+        sma_50 = df['SMA_50'].iloc[-1]
+        current_volume = df['Volume'].iloc[-1]
+        volume_sma_20 = df['Volume_SMA_20'].iloc[-1]
+        
+        # Check for NaN
+        if pd.isna(sma_50) or pd.isna(volume_sma_20):
+            return False, 'Insufficient data for guards', {}
+        
+        guard_details = {
+            'current_price': round(float(current_price), 2),
+            'sma_50': round(float(sma_50), 2),
+            'price_above_sma': current_price > sma_50,
+            'current_volume': int(current_volume),
+            'volume_sma_20': int(volume_sma_20),
+            'volume_above_avg': current_volume > volume_sma_20,
+            'price_sma_diff_pct': round(((current_price - sma_50) / sma_50 * 100), 2),
+            'volume_ratio': round((current_volume / volume_sma_20), 2)
+        }
+        
+        # Guard 1: Price must be above 50 SMA
+        if current_price <= sma_50:
+            return False, f'Below 50 SMA (Price: {current_price:.2f} vs SMA: {sma_50:.2f})', guard_details
+        
+        # Guard 2: Volume must be above 20-day average
+        if current_volume < volume_sma_20:
+            return False, f'Weak Volume ({current_volume:,} < {volume_sma_20:,.0f})', guard_details
+        
+        # All guards passed
+        return True, 'PASS - All guards cleared', guard_details
+        
+    except Exception as e:
+        return False, f'Error checking guards: {str(e)}', {}
+
+
+def generate_signal_daily(df, min_score=60, use_guards=True):
+    """
+    Generate daily trading signals with KNIFE GUARDS + BALANCED indicator weights.
+    
+    NEW: Pre-filters with knife guards before technical analysis
+    
+    Args:
+        df: Price/volume dataframe
+        min_score: Minimum score threshold for BUY/SELL signals
+        use_guards: Whether to apply knife guards (default True)
 
     Weight Distribution (BALANCED):
     - RSI: 20%
@@ -32,7 +100,31 @@ def generate_signal_daily(df, min_score=60):
     """
     if df is None or df.empty or len(df) < 60:
         return "HOLD", 0, {"error": "Insufficient data"}
-
+    
+    # ===== NEW: KNIFE GUARDS CHECK =====
+    if use_guards:
+        guard_passed, guard_reason, guard_details = check_knife_guards(df)
+        
+        if not guard_passed:
+            # Return HOLD with guard failure reason
+            return "HOLD", 0, {
+                "guard_status": "FAILED",
+                "guard_reason": guard_reason,
+                "guard_details": guard_details,
+                "note": "Filtered by knife guards - avoiding potential falling knife"
+            }
+        
+        # Guards passed - continue with technical analysis
+        details_prefix = {
+            "guard_status": "PASSED",
+            "guard_reason": guard_reason,
+            "guard_details": guard_details
+        }
+    else:
+        details_prefix = {"guard_status": "DISABLED"}
+    
+    # ===== ORIGINAL SIGNAL GENERATION LOGIC =====
+    
     # Calculate all indicators
     rsi = calculate_rsi(df)
     macd, macd_signal, macd_hist = calculate_macd(df)
@@ -240,8 +332,9 @@ def generate_signal_daily(df, min_score=60):
     else:
         final_signal = "HOLD"
 
-    # Details
+    # Details (merge with guard details if guards were used)
     details = {
+        **details_prefix,  # Guard status and details
         'rsi': round(current_rsi, 2),
         'macd': round(current_macd, 4),
         'macd_signal': round(current_macd_signal, 4),

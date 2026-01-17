@@ -113,25 +113,25 @@ def add_position(ticker: str, strategy: str, entry_price: float, quantity: int,
         """, (ticker, strategy, float(entry_price), int(quantity), float(stop_loss), float(take_profit),
               category, entry_date, ai_agrees, ai_confidence, ai_reasoning, ai_agrees, trading_mode))
         return cur.fetchone()['id']
-def debit_capital(strategy: str, amount: float):
+def debit_capital(strategy: str, amount: float, trading_mode: str = 'PAPER'):
     """Debit capital when entering a position"""
     with get_db_cursor() as cur:
         cur.execute("""
             UPDATE capital_tracker
             SET current_trading_capital = current_trading_capital - %s,
                 last_updated = CURRENT_TIMESTAMP
-            WHERE strategy = %s
-        """, (amount, strategy))
+            WHERE strategy = %s AND trading_mode = %s
+        """, (amount, strategy, trading_mode))
 
-def credit_capital(strategy: str, amount: float):
+def credit_capital(strategy: str, amount: float, trading_mode: str = 'PAPER'):
     """Credit capital back when exiting a position"""
     with get_db_cursor() as cur:
         cur.execute("""
             UPDATE capital_tracker
             SET current_trading_capital = current_trading_capital + %s,
                 last_updated = CURRENT_TIMESTAMP
-            WHERE strategy = %s
-        """, (amount, strategy))
+            WHERE strategy = %s AND trading_mode = %s
+        """, (amount, strategy, trading_mode))
 
 def update_position_price(ticker: str, strategy: str, current_price: float):
     """Update current price and unrealized P&L for a position"""
@@ -217,7 +217,7 @@ def get_capital(strategy: str) -> Dict:
         """, (strategy,))
         return cur.fetchone()
 
-def update_capital(strategy: str, pnl: float):
+def update_capital(strategy: str, pnl: float, trading_mode: str = 'PAPER'):
     """Update capital after trade (profits locked, losses deducted)"""
     with get_db_cursor() as cur:
         if pnl > 0:
@@ -226,8 +226,8 @@ def update_capital(strategy: str, pnl: float):
                 UPDATE capital_tracker
                 SET total_profits_locked = total_profits_locked + %s,
                     last_updated = CURRENT_TIMESTAMP
-                WHERE strategy = %s
-            """, (pnl, strategy))
+                WHERE strategy = %s AND trading_mode = %s
+            """, (pnl, strategy, trading_mode))
         else:
             # Deduct losses from trading capital
             cur.execute("""
@@ -235,51 +235,31 @@ def update_capital(strategy: str, pnl: float):
                 SET current_trading_capital = current_trading_capital + %s,
                     total_losses = total_losses + %s,
                     last_updated = CURRENT_TIMESTAMP
-                WHERE strategy = %s
-            """, (pnl, abs(pnl), strategy))
+                WHERE strategy = %s AND trading_mode = %s
+            """, (pnl, abs(pnl), strategy, trading_mode))
 
 def get_available_cash(strategy: str, trading_mode: str = 'PAPER') -> float:
     """
     Calculate available capital for a strategy
 
-    Formula: (Initial Capital - Realized Losses) - Currently Deployed
-
-    IMPORTANT: Profits are LOCKED and never redeployed. Only losses reduce the capital pool.
+    Formula: Initial - Deployed - Realized Losses - Unrealized Losses
+    (Per CAPITAL_ALLOCATION_MODEL.md - profits are locked and NOT redeployed)
 
     Where:
-    - INITIAL_CAPITAL = From capital_tracker table (₹500K for PAPER, ₹1 for LIVE)
-    - Realized Losses = SUM of all negative P&L from positions + trades (permanent reduction)
-    - Realized Profits = LOCKED AWAY (not available for redeployment)
-    - Currently Deployed = SUM(entry_price * quantity) for HOLD positions
-    - trading_mode = 'PAPER' (default) or 'LIVE'
+    - Initial = From capital_tracker.initial_capital
+    - Deployed = SUM(entry_price * quantity) for HOLD positions
+    - Realized Losses = SUM of negative realized_pnl from CLOSED positions only
+    - Unrealized Losses = SUM of negative unrealized_pnl from HOLD positions
     """
     with get_db_cursor() as cur:
-        # Get initial capital from capital_tracker
+        # Get initial capital
         cur.execute("""
             SELECT initial_capital
             FROM capital_tracker
             WHERE strategy = %s AND trading_mode = %s
         """, (strategy, trading_mode))
         result = cur.fetchone()
-        INITIAL_CAPITAL = float(result['initial_capital']) if result else 500000
-
-        # Get total realized losses from closed positions
-        cur.execute("""
-            SELECT COALESCE(SUM(ABS(realized_pnl)), 0) as losses
-            FROM positions
-            WHERE strategy = %s AND status = 'CLOSED' AND realized_pnl < 0 AND trading_mode = %s
-        """, (strategy, trading_mode))
-        losses_positions = float(cur.fetchone()['losses'])
-
-        # Get total losses from trades table
-        cur.execute("""
-            SELECT COALESCE(SUM(ABS(pnl)), 0) as losses
-            FROM trades
-            WHERE strategy = %s AND pnl < 0 AND trading_mode = %s
-        """, (strategy, trading_mode))
-        losses_trades = float(cur.fetchone()['losses'])
-
-        total_losses = losses_positions + losses_trades
+        initial_capital = float(result['initial_capital']) if result else 500000
 
         # Get currently deployed capital (only HOLD positions)
         cur.execute("""
@@ -289,11 +269,25 @@ def get_available_cash(strategy: str, trading_mode: str = 'PAPER') -> float:
         """, (strategy, trading_mode))
         deployed = float(cur.fetchone()['deployed'])
 
-        # Trading Capital = Initial - Losses (profits are locked and excluded)
-        trading_capital = INITIAL_CAPITAL - total_losses
+        # Get realized losses from CLOSED positions only (not from trades table to avoid double-counting)
+        cur.execute("""
+            SELECT COALESCE(SUM(realized_pnl), 0) as realized_losses
+            FROM positions
+            WHERE strategy = %s AND status = 'CLOSED' AND realized_pnl < 0 AND trading_mode = %s
+        """, (strategy, trading_mode))
+        realized_losses = float(cur.fetchone()['realized_losses'])  # This will be negative
 
-        # Available = Trading Capital - Deployed
-        available = trading_capital - deployed
+        # Get unrealized losses from HOLD positions
+        cur.execute("""
+            SELECT COALESCE(SUM(unrealized_pnl), 0) as unrealized_losses
+            FROM positions
+            WHERE strategy = %s AND status = 'HOLD' AND trading_mode = %s AND unrealized_pnl < 0
+        """, (strategy, trading_mode))
+        unrealized_losses = float(cur.fetchone()['unrealized_losses'])  # This will be negative
+
+        # Available = Initial - Deployed - Realized Losses - Unrealized Losses
+        # (Losses are negative, so subtracting negative adds to available)
+        available = initial_capital - deployed - realized_losses - unrealized_losses
 
         return available
 # ==================== CIRCUIT BREAKER ====================
@@ -419,3 +413,26 @@ def get_trade_summary(strategy: str = None) -> Dict:
             cur.execute("SELECT * FROM v_trade_summary")
         result = cur.fetchone()
         return result if result else {}
+
+def has_active_position(ticker):
+    """
+    Check if ticker has an active position in ANY strategy
+    
+    Args:
+        ticker: Stock ticker (e.g., 'TCS.NS')
+    
+    Returns:
+        (bool, str): (has_position, strategy_name)
+    """
+    with get_db_cursor() as cur:
+        cur.execute("""
+            SELECT strategy
+            FROM positions
+            WHERE ticker = %s AND status = 'HOLD'
+            LIMIT 1
+        """, (ticker,))
+        
+        result = cur.fetchone()
+        if result:
+            return (True, result['strategy'])
+        return (False, None)

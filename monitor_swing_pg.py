@@ -95,6 +95,20 @@ def apply_profit_lock_logic(ticker, entry_price, current_price, locked_floor, cu
 def monitor_positions():
     """Check all SWING positions for TP/SL hits and apply profit-lock extension"""
 
+    # Market hours check: NSE opens at 9:15 AM, closes at 3:30 PM
+    now = datetime.now().time()
+    market_open = datetime.strptime("09:15", "%H:%M").time()
+    market_close = datetime.strptime("15:30", "%H:%M").time()
+
+    if now < market_open:
+        log(f"⏰ Market not open yet (current: {now.strftime('%H:%M')}, opens: 09:15)")
+        log("   Skipping monitoring - will use stale prices before market opens")
+        return
+
+    if now > market_close:
+        log(f"⏰ Market closed (current: {now.strftime('%H:%M')}, closed: 15:30)")
+        return
+
     with get_db_cursor() as cur:
         cur.execute("""
             SELECT ticker, entry_price, entry_date, quantity, stop_loss, take_profit,
@@ -296,114 +310,114 @@ def monitor_positions():
     if exits_made == 0 and profit_locks_activated == 0 and stops_updated == 0:
         log("All positions within TP/SL range")
 
-    # REGIME-BASED CAPITAL REALLOCATION (using existing global_market_filter.py)
-    try:
-        log("\\n💰 Checking freed capital for regime-based re-entry...")
-        available_cash = get_available_cash(STRATEGY)
-        log(f"   Available capital: ₹{available_cash:,.0f}")
-
-        # Only reallocate if we have significant freed capital (> Rs 1L)
-        if available_cash > 100000:
-            log(f"   ✅ Sufficient capital available (> ₹1,00,000)")
-
-            # Check market regime using EXISTING system
-            log(f"   🌍 Checking market regime using global_market_filter...")
-            regime_data = get_current_regime()
-
-            if regime_data:
-                regime = regime_data['regime']
-                score = regime_data['score']
-                
-                # Extract indicator details for display
-                indicators = regime_data.get('indicators', {})
-                nikkei = indicators.get('nikkei', {})
-                hsi = indicators.get('hang_seng', {})
-                sp_futures = indicators.get('sp_futures', {})
-                gold = indicators.get('gold', {})
-                vix = indicators.get('vix', {})
-
-                log(f"   📊 Regime: {regime} (Score: {score:.2f})")
-                log(f"       Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%")
-                log(f"       S&P Futures: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%")
-                log(f"       VIX: {vix.get('value', 'N/A'):.2f}")
-
-                # Calculate capital allocation based on YOUR requirements (75% BULL, 50% NEUTRAL, 0% BEAR)
-                if regime == "BULL":
-                    allocation_pct = 0.75
-                elif regime in ["NEUTRAL", "CAUTION"]:  # Treat CAUTION as NEUTRAL
-                    allocation_pct = 0.50
-                else:  # BEAR
-                    allocation_pct = 0.00
-
-                deployable_capital = available_cash * allocation_pct
-
-                log(f"   💼 Capital allocation: {allocation_pct*100:.0f}% = ₹{deployable_capital:,.0f}")
-
-                if deployable_capital > 0:
-                    log(f"   🔄 Triggering SWING smart entry with regime-based capital allocation...")
-
-                    # Get path to swing_trading_smartentry.py
-                    script_dir = os.path.dirname(os.path.abspath(__file__))
-                    swing_smartentry_script = os.path.join(script_dir, 'swing_trading_smartentry.py')
-
-                    # Get python path
-                    python_path = sys.executable
-
-                    # Send Telegram notification before running
-                    send_telegram_message(
-                        f"🔄 <b>REGIME-BASED RE-ENTRY TRIGGERED (SWING)</b>\\n\\n"
-                        f"💰 Available: ₹{available_cash:,.0f}\\n"
-                        f"🌍 Regime: {regime} (Score: {score:.2f})\\n"
-                        f"📊 Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%\\n"
-                        f"📈 S&P: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%\\n"
-                        f"📉 VIX: {vix.get('value', 'N/A'):.2f}\\n\\n"
-                        f"💼 Deploying: ₹{deployable_capital:,.0f} ({allocation_pct*100:.0f}%)\\n\\n"
-                        f"⏳ Running smart entry..."
-                    )
-
-                    # Run swing_trading_smartentry.py as subprocess
-                    log(f"   🚀 Running: {python_path} {swing_smartentry_script}")
-                    result = subprocess.run(
-                        [python_path, swing_smartentry_script],
-                        capture_output=True,
-                        text=True,
-                        timeout=300  # 5 minute timeout
-                    )
-
-                    if result.returncode == 0:
-                        log(f"   ✅ Smart entry completed successfully")
-                        send_telegram_message(
-                            f"✅ <b>SWING RE-ENTRY COMPLETE</b>\\n\\n"
-                            f"Check position updates above ⬆️"
-                        )
-                    else:
-                        log(f"   ❌ Smart entry failed with exit code {result.returncode}")
-                        log(f"   Error output: {result.stderr}")
-                        send_telegram_message(
-                            f"❌ <b>SWING RE-ENTRY FAILED</b>\\n\\n"
-                            f"Exit code: {result.returncode}\\n"
-                            f"Check logs for details"
-                        )
-                else:
-                    log(f"   ⏸️ BEAR regime detected - skipping re-entry (0% allocation)")
-                    send_telegram_message(
-                        f"🐻 <b>SWING RE-ENTRY SKIPPED</b>\\n\\n"
-                        f"💰 Available: ₹{available_cash:,.0f}\\n"
-                        f"🌍 Regime: {regime} (Score: {score:.2f})\\n"
-                        f"📊 Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%\\n"
-                        f"📈 S&P: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%\\n"
-                        f"📉 VIX: {vix.get('value', 'N/A'):.2f}\\n\\n"
-                        f"⚠️ BEAR market conditions - capital preserved"
-                    )
-
-            else:
-                log(f"   ⚠️ No regime data available (run global_market_filter.py first)")
-
-        else:
-            log(f"   ⏸️ Insufficient capital for re-entry (need > ₹1,00,000)")
-
-    except Exception as e:
-        log(f"   ⚠️ Error during regime-based re-entry check: {e}")
+# DISABLED:     # REGIME-BASED CAPITAL REALLOCATION (using existing global_market_filter.py)
+# DISABLED:     try:
+# DISABLED:         log("\\n💰 Checking freed capital for regime-based re-entry...")
+# DISABLED:         available_cash = get_available_cash(STRATEGY)
+# DISABLED:         log(f"   Available capital: ₹{available_cash:,.0f}")
+# DISABLED: 
+# DISABLED:         # Only reallocate if we have significant freed capital (> Rs 1L)
+# DISABLED:         if available_cash > 100000:
+# DISABLED:             log(f"   ✅ Sufficient capital available (> ₹1,00,000)")
+# DISABLED: 
+# DISABLED:             # Check market regime using EXISTING system
+# DISABLED:             log(f"   🌍 Checking market regime using global_market_filter...")
+# DISABLED:             regime_data = get_current_regime()
+# DISABLED: 
+# DISABLED:             if regime_data:
+# DISABLED:                 regime = regime_data['regime']
+# DISABLED:                 score = regime_data['score']
+# DISABLED:                 
+# DISABLED:                 # Extract indicator details for display
+# DISABLED:                 indicators = regime_data.get('indicators', {})
+# DISABLED:                 nikkei = indicators.get('nikkei', {})
+# DISABLED:                 hsi = indicators.get('hang_seng', {})
+# DISABLED:                 sp_futures = indicators.get('sp_futures', {})
+# DISABLED:                 gold = indicators.get('gold', {})
+# DISABLED:                 vix = indicators.get('vix', {})
+# DISABLED: 
+# DISABLED:                 log(f"   📊 Regime: {regime} (Score: {score:.2f})")
+# DISABLED:                 log(f"       Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%")
+# DISABLED:                 log(f"       S&P Futures: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%")
+# DISABLED:                 log(f"       VIX: {vix.get('value', 'N/A'):.2f}")
+# DISABLED: 
+# DISABLED:                 # Calculate capital allocation based on YOUR requirements (75% BULL, 50% NEUTRAL, 0% BEAR)
+# DISABLED:                 if regime == "BULL":
+# DISABLED:                     allocation_pct = 0.75
+# DISABLED:                 elif regime in ["NEUTRAL", "CAUTION"]:  # Treat CAUTION as NEUTRAL
+# DISABLED:                     allocation_pct = 0.50
+# DISABLED:                 else:  # BEAR
+# DISABLED:                     allocation_pct = 0.00
+# DISABLED: 
+# DISABLED:                 deployable_capital = available_cash * allocation_pct
+# DISABLED: 
+# DISABLED:                 log(f"   💼 Capital allocation: {allocation_pct*100:.0f}% = ₹{deployable_capital:,.0f}")
+# DISABLED: 
+# DISABLED:                 if deployable_capital > 0:
+# DISABLED:                     log(f"   🔄 Triggering SWING smart entry with regime-based capital allocation...")
+# DISABLED: 
+# DISABLED:                     # Get path to swing_trading_smartentry.py
+# DISABLED:                     script_dir = os.path.dirname(os.path.abspath(__file__))
+# DISABLED:                     swing_smartentry_script = os.path.join(script_dir, 'swing_trading_smartentry.py')
+# DISABLED: 
+# DISABLED:                     # Get python path
+# DISABLED:                     python_path = sys.executable
+# DISABLED: 
+# DISABLED:                     # Send Telegram notification before running
+# DISABLED:                     send_telegram_message(
+# DISABLED:                         f"🔄 <b>REGIME-BASED RE-ENTRY TRIGGERED (SWING)</b>\\n\\n"
+# DISABLED:                         f"💰 Available: ₹{available_cash:,.0f}\\n"
+# DISABLED:                         f"🌍 Regime: {regime} (Score: {score:.2f})\\n"
+# DISABLED:                         f"📊 Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%\\n"
+# DISABLED:                         f"📈 S&P: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%\\n"
+# DISABLED:                         f"📉 VIX: {vix.get('value', 'N/A'):.2f}\\n\\n"
+# DISABLED:                         f"💼 Deploying: ₹{deployable_capital:,.0f} ({allocation_pct*100:.0f}%)\\n\\n"
+# DISABLED:                         f"⏳ Running smart entry..."
+# DISABLED:                     )
+# DISABLED: 
+# DISABLED:                     # Run swing_trading_smartentry.py as subprocess
+# DISABLED:                     log(f"   🚀 Running: {python_path} {swing_smartentry_script}")
+# DISABLED:                     result = subprocess.run(
+# DISABLED:                         [python_path, swing_smartentry_script],
+# DISABLED:                         capture_output=True,
+# DISABLED:                         text=True,
+# DISABLED:                         timeout=300  # 5 minute timeout
+# DISABLED:                     )
+# DISABLED: 
+# DISABLED:                     if result.returncode == 0:
+# DISABLED:                         log(f"   ✅ Smart entry completed successfully")
+# DISABLED:                         send_telegram_message(
+# DISABLED:                             f"✅ <b>SWING RE-ENTRY COMPLETE</b>\\n\\n"
+# DISABLED:                             f"Check position updates above ⬆️"
+# DISABLED:                         )
+# DISABLED:                     else:
+# DISABLED:                         log(f"   ❌ Smart entry failed with exit code {result.returncode}")
+# DISABLED:                         log(f"   Error output: {result.stderr}")
+# DISABLED:                         send_telegram_message(
+# DISABLED:                             f"❌ <b>SWING RE-ENTRY FAILED</b>\\n\\n"
+# DISABLED:                             f"Exit code: {result.returncode}\\n"
+# DISABLED:                             f"Check logs for details"
+# DISABLED:                         )
+# DISABLED:                 else:
+# DISABLED:                     log(f"   ⏸️ BEAR regime detected - skipping re-entry (0% allocation)")
+# DISABLED:                     send_telegram_message(
+# DISABLED:                         f"🐻 <b>SWING RE-ENTRY SKIPPED</b>\\n\\n"
+# DISABLED:                         f"💰 Available: ₹{available_cash:,.0f}\\n"
+# DISABLED:                         f"🌍 Regime: {regime} (Score: {score:.2f})\\n"
+# DISABLED:                         f"📊 Nikkei: {nikkei.get('change_pct', 'N/A'):+.2f}% | HSI: {hsi.get('change_pct', 'N/A'):+.2f}%\\n"
+# DISABLED:                         f"📈 S&P: {sp_futures.get('change_pct', 'N/A'):+.2f}% | Gold: {gold.get('change_pct', 'N/A'):+.2f}%\\n"
+# DISABLED:                         f"📉 VIX: {vix.get('value', 'N/A'):.2f}\\n\\n"
+# DISABLED:                         f"⚠️ BEAR market conditions - capital preserved"
+# DISABLED_REENTRY:                     )
+# DISABLED_REENTRY: 
+# DISABLED_REENTRY:             else:
+# DISABLED_REENTRY:                 log(f"   ⚠️ No regime data available (run global_market_filter.py first)")
+# DISABLED_REENTRY: 
+# DISABLED_REENTRY:         else:
+# DISABLED_REENTRY:             log(f"   ⏸️ Insufficient capital for re-entry (need > ₹1,00,000)")
+# DISABLED_REENTRY: 
+# DISABLED_REENTRY:     except Exception as e:
+# DISABLED_REENTRY:         log(f"   ⚠️ Error during regime-based re-entry check: {e}")
         import traceback
         traceback.print_exc()
 

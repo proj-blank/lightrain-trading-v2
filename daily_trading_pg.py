@@ -48,39 +48,105 @@ except ImportError:
 # AngelOne price fetcher
 from scripts.angelone_price_fetcher import get_live_price
 
+# Sector analysis for rotation and diversification
+from scripts.sector_analysis import (
+    get_sector_rotation_ranking, is_sector_in_top_n,
+    check_relative_strength_vs_peers, check_sector_limit, get_stock_sector
+)
+
+
+def calculate_trading_days(start_date, end_date):
+    """
+    Calculate number of trading days (weekdays only) between two dates
+    Excludes weekends (Saturday, Sunday)
+    Does NOT count the start date (only counts days HELD after entry)
+    """
+    import pandas as pd
+    from datetime import timedelta
+    
+    start = pd.to_datetime(start_date)
+    end = pd.to_datetime(end_date)
+    
+    # Don't count the entry date itself, start from next day
+    start_next = start + timedelta(days=1)
+    
+    # Generate business days from day after start to end (inclusive)
+    if end >= start_next:
+        business_days = pd.bdate_range(start=start_next, end=end)
+        return len(business_days)
+    else:
+        return 0  # Same day entry/exit
+
+
+
 # Configuration
-# ACCOUNT_SIZE is the TOTAL INITIAL CAPITAL for DAILY strategy (₹5L)
-# This is NOT the same as available cash (which changes based on losses/deployment)
-ACCOUNT_SIZE = 500000  # ₹5L total capital for DAILY strategy
-print(f"✓ DAILY total capital: ₹{ACCOUNT_SIZE:,}")
-MAX_DAILY_POSITIONS = 10  # Maximum 10 concurrent DAILY positions (better capital efficiency)
-MAX_POSITION_PCT = 0.20  # 20% max position size (₹100k max per position)
-MIN_COMBINED_SCORE = 60  # Increased from 50 for better selection
+ACCOUNT_SIZE = 500000  # ₹5L for DAILY strategy
+MAX_DAILY_POSITIONS = 20  # Maximum 20 concurrent DAILY positions
+MAX_POSITION_PCT = 0.15  # 15% max position size (reduced from 30% for better diversification) (increased for 1% risk sizing)
+MAX_POSITIONS_PER_SECTOR = 2  # Max 2 positions per sector for diversification
+MIN_COMBINED_SCORE = 50
 USE_ATR_SIZING = True
 MIN_RS_RATING = 60  # Minimum Relative Strength rating for daily trading (1-99 scale)
 MIN_SCORE = 60  # Minimum technical score to qualify for entry
-MAX_HOLD_DAYS = 3  # Maximum calendar days to hold a position (force exit to free capital)
+MAX_HOLD_DAYS = 3  # Maximum TRADING days to hold a position (excludes weekends)
 RISK_PER_TRADE_PCT = 0.01  # 1% risk per trade (Fixed Risk Position Sizing)
 TARGET_RR_RATIO = 1.5  # 1.5:1 Risk:Reward for faster exits (3-day max hold)
-
-# MARKET HOURS CHECK
-from datetime import datetime
-import pytz
-ist = pytz.timezone("Asia/Kolkata")
-now = datetime.now(ist)
-hour, minute = now.hour, now.minute
-if not ((hour == 9 and minute >= 15) or (9 < hour < 15) or (hour == 15 and minute <= 30)):
-    print(f"❌ Market Closed - {now.strftime('%I:%M %p IST')} (Hours: 9:15 AM - 3:30 PM)")
-    sys.exit(0)
-print(f"✅ Market Open - {now.strftime('%I:%M %p IST')}")
-
 STRATEGY = 'DAILY'
+TRADING_MODE = os.getenv('TRADING_MODE', 'PAPER')  # PAPER (default) or LIVE
 
 print("=" * 70)
 print("🤖 DAILY AUTOMATED TRADING (PostgreSQL + NSE Universe)")
 print("=" * 70)
 print(f"📅 {datetime.now().strftime('%d %b %Y, %H:%M:%S')}")
 print("=" * 70)
+
+# MARKET HOURS AND HOLIDAY CHECK
+def is_market_open():
+    """Check if Indian stock market (NSE) is currently open"""
+    import pytz
+    
+    # Check market hours (9:15 AM - 3:30 PM IST)
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist)
+    hour, minute = now.hour, now.minute
+    
+    # Time check
+    market_hours_open = (hour == 9 and minute >= 15) or (9 < hour < 15) or (hour == 15 and minute <= 30)
+    
+    if not market_hours_open:
+        return False, f"Outside market hours: {now.strftime('%I:%M %p IST')} (Market: 9:15 AM - 3:30 PM)"
+    
+    # Holiday check - fetch NIFTY data to see if market is actually open
+    try:
+        nifty = yf.Ticker("^NSEI")
+        hist = nifty.history(period="2d")
+        
+        if hist.empty:
+            return False, "No market data available (likely holiday)"
+        
+        # Check if today's date appears in the data
+        today_str = now.strftime('%Y-%m-%d')
+        dates_in_data = hist.index.strftime('%Y-%m-%d').tolist()
+        
+        if today_str not in dates_in_data:
+            last_day = dates_in_data[-1] if dates_in_data else 'unknown'
+            return False, f"Market holiday detected (last trading day: {last_day})"
+        
+        return True, f"Market open - {now.strftime('%I:%M %p IST')}"
+    
+    except Exception as e:
+        # On error, assume market is open (fail-safe for connectivity issues)
+        print(f"⚠️ Warning: Could not verify holiday status ({e}). Proceeding with caution.")
+        return True, f"Market hours OK (holiday check failed)"
+
+is_open, reason = is_market_open()
+if not is_open:
+    message = f"❌ Market Closed - {reason}"
+    print(message)
+    send_telegram_message(f"⏸️ {STRATEGY} Trading Skipped\n\n{reason}")
+    sys.exit(0)
+print(f"✅ {reason}")
+
 
 # Check if trading is enabled
 TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() == "true"
@@ -122,6 +188,110 @@ if os.path.exists(halt_file):
         # Continue trading on error to be safe
         pass
 
+
+# ========== LOAD PORTFOLIO AND CHECK EXITS (BEFORE REGIME CHECKS) ==========
+print("\n📥 Loading portfolio and checking exits...")
+
+# Load existing positions
+positions = get_active_positions(STRATEGY)
+
+if positions:
+    # Get tickers for price fetching
+    position_tickers = [pos['ticker'] for pos in positions if pos['status'] == 'HOLD']
+    
+    if position_tickers:
+        print(f"📊 Found {len(position_tickers)} active positions")
+        
+        # Download price data for positions
+        print(f"📥 Loading price data for positions...")
+        position_stock_data = {}
+        
+        for ticker in position_tickers:
+            try:
+                df = yf.download(ticker, period='5d', interval='1d', progress=False)
+                
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                
+                if not df.empty:
+                    position_stock_data[ticker] = df
+            except Exception as e:
+                print(f"  ⚠️ {ticker}: Failed to fetch data - {e}")
+        
+        print(f"✅ Loaded data for {len(position_stock_data)} positions")
+        
+        # Check MAX-HOLD exits
+        max_hold_exits = 0
+        
+        for pos in positions:
+            if pos['status'] != 'HOLD':
+                continue
+            
+            ticker = pos['ticker']
+            entry_price = float(pos['entry_price'])
+            entry_date = pos['entry_date']
+            qty = int(pos['quantity'])
+            
+            # Calculate trading days held
+            entry_dt = pd.to_datetime(entry_date)
+            current_dt = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
+            days_held = calculate_trading_days(entry_dt, current_dt)
+            
+            # Check MAX-HOLD
+            if days_held >= MAX_HOLD_DAYS:
+                if ticker in position_stock_data and not position_stock_data[ticker].empty:
+                    current_price = float(position_stock_data[ticker]['Close'].iloc[-1])
+                else:
+                    print(f"  ⚠️ {ticker}: MAX-HOLD reached ({days_held}d) but no price data")
+                    continue
+                
+                pnl = (current_price - entry_price) * qty
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                
+                print(f"  ⏰ MAX-HOLD EXIT: {ticker} @ ₹{current_price:.2f} | P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%) | {days_held}d")
+                
+                send_telegram_message(
+                    f"{pnl_emoji} <b>MAX-HOLD EXIT</b>\n\n"
+                    f"📊 Ticker: {ticker} ({STRATEGY})\n"
+                    f"⏰ Reason: Held {days_held} days (max: {MAX_HOLD_DAYS})\n"
+                    f"💰 Entry: ₹{entry_price:.2f} → Exit: ₹{current_price:.2f}\n"
+                    f"💵 P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n\n"
+                    f"<i>Freeing capital for new opportunities</i>"
+                )
+                
+                try:
+                    close_position(ticker, STRATEGY, current_price, pnl)
+                    credit_capital(STRATEGY, entry_price * qty)
+                    update_capital(STRATEGY, pnl)
+                    
+                    log_trade(
+                        ticker=ticker,
+                        strategy=STRATEGY,
+                        signal='SELL',
+                        price=current_price,
+                        quantity=qty,
+                        pnl=pnl,
+                        notes=f"MAX-HOLD exit after {days_held} trading days",
+                        trading_mode=TRADING_MODE
+                    )
+                    
+                    max_hold_exits += 1
+                    print(f"  ✅ Position closed")
+                except Exception as e:
+                    print(f"  ❌ Failed to close: {e}")
+        
+        if max_hold_exits > 0:
+            print(f"✅ Exited {max_hold_exits} MAX-HOLD position(s)")
+        else:
+            print(f"✅ No MAX-HOLD exits needed")
+    else:
+        print("✅ No active positions")
+else:
+    print("✅ No positions in database")
+
+# ========== END EXIT CHECKS ==========
+
 # Check global market regime
 import json
 
@@ -130,32 +300,153 @@ if os.path.exists(regime_file):
     with open(regime_file, 'r') as f:
         regime = json.load(f)
 
-    if not regime.get('allow_new_entries', True):
+    # Store regime data for later checks (SOFT BLOCK - no sys.exit)
+    GLOBAL_ALLOW_NEW_ENTRIES = regime.get('allow_new_entries', True)
+    REGIME_MULTIPLIER = regime.get('position_sizing_multiplier', 1.0)
+    
+    if not GLOBAL_ALLOW_NEW_ENTRIES:
         print(f"🚫 Global regime: {regime.get('regime', 'UNKNOWN')}")
         print(f"   Score: {regime.get('score', 0)}")
         print(f"   Allow entries: False")
-        print("   Skipping DAILY trading due to BEAR market")
-
-        send_telegram_message(
-            f"🚫 DAILY Trading Blocked\n\n"
-            f"Market Regime: {regime.get('regime', 'UNKNOWN')}\n"
-            f"Score: {regime.get('score', 0)}\n"
-            f"Reason: Global market check says RISK OFF\n\n"
-            f"No new positions entered today."
-        )
-        sys.exit(0)
+        print(f"   Will check exits, then skip new entries")
     else:
-        # Store regime multiplier for position sizing
-        REGIME_MULTIPLIER = regime.get('position_sizing_multiplier', 1.0)
-
         print(f"✅ Global regime: {regime.get('regime', 'UNKNOWN')} (score: {regime.get('score', 0)})")
         print(f"   Allow entries: True")
         print(f"   Position multiplier: {REGIME_MULTIPLIER*100}%")
 else:
     # No regime data found, default to 100%
     REGIME_MULTIPLIER = 1.0
+    GLOBAL_ALLOW_NEW_ENTRIES = True  # Default to allowing entries
     print("⚠️ No market regime data found (run global_market_filter.py at 8:30 AM)")
     print("   Using default 100% position sizing")
+
+# ========== SMART ENTRY VALIDATOR (9:15 AM + 9:30 AM) ==========
+from scripts.smart_entry_validator import (
+    validate_nifty_at_open,
+    analyze_nifty_strength_930
+)
+
+# STEP 1: Check Nifty regime at 9:15 AM
+print("\n🔍 SMART ENTRY: Checking Nifty regime (9:15 AM)...")
+action_915, regime_915, regime_multiplier_915, reason_915, nifty_data_915 = validate_nifty_at_open()
+
+# Store 9:15 regime data (SOFT BLOCK - no sys.exit)
+NIFTY_915_ALLOW_ENTRIES = (action_915 != "SKIP")
+
+if action_915 == "SKIP":
+    print(f"❌ BEAR regime detected: {regime_915}")
+    print(f"   Regime multiplier: {regime_multiplier_915} (0% = SKIP ALL)")
+    print(f"   Will check exits, then skip new entries")
+else:
+    print(f"✅ Nifty regime: {regime_915} (multiplier: {regime_multiplier_915*100:.0f}%)")
+
+# STEP 2: Check Nifty opening candle at 9:30 AM
+print("🔍 SMART ENTRY: Analyzing Nifty opening candle (9:30 AM)...")
+candle_level, slice_pct, notes_930, candle_data = analyze_nifty_strength_930()
+
+# Debug logging to see actual values
+print(f"🔍 DEBUG - Candle Analysis:")
+print(f"   Pattern: {candle_data.get('pattern', 'None')}")
+print(f"   Level: {candle_level}")
+print(f"   slice_pct (raw decimal): {slice_pct}")
+print(f"   slice_pct as %: {slice_pct*100:.1f}%")
+
+# Check for UNKNOWN pattern (SOFT BLOCK - no sys.exit)
+CANDLE_PATTERN_VALID = not (candle_data.get("pattern") is None or candle_level == "UNKNOWN")
+
+if not CANDLE_PATTERN_VALID:
+    print(f"❌ UNKNOWN/None candle pattern detected (likely holiday or no data)")
+    print(f"   Pattern: {candle_data.get('pattern', 'None')}")
+    print(f"   Level: {candle_level}")
+    print(f"   Will check exits, then skip new entries")
+    slice_pct = 0  # Force 0% deployment
+
+
+# Check candle strength (SOFT BLOCK - no sys.exit)
+CANDLE_ALLOWS_ENTRIES = (slice_pct > 0)
+
+if slice_pct == 0:
+    print(f"❌ STRONG_BEARISH opening candle detected")
+    print(f"   Pattern: {candle_data.get('pattern', 'Unknown')}")
+    print(f"   Slice %: {slice_pct*100:.0f}% (0% = SKIP ALL)")
+    print(f"   Will check exits, then skip new entries")
+else:
+    print(f"✅ Nifty candle: {candle_level} ({notes_930}, slice: {slice_pct*100:.0f}%)")
+
+# STEP 3: Calculate final deployment percentage
+# slice_pct is already a decimal (0.0 to 1.0), so just multiply directly
+SMART_ENTRY_DEPLOYMENT_PCT = regime_multiplier_915 * slice_pct
+
+print(f"\n💡 SMART ENTRY FINAL DEPLOYMENT:")
+print(f"   Regime multiplier: {regime_multiplier_915*100:.0f}%")
+print(f"   Candle slice: {slice_pct*100:.0f}%")
+print(f"   Final deployment: {SMART_ENTRY_DEPLOYMENT_PCT*100:.1f}%")
+
+# Override position sizing with smart entry result
+REGIME_MULTIPLIER = SMART_ENTRY_DEPLOYMENT_PCT
+print(f"   Overriding position sizing with {REGIME_MULTIPLIER*100:.1f}% deployment\n")
+
+# Send telegram notification with final deployment decision
+send_telegram_message(
+    f"✅ <b>DAILY TRADING - Smart Entry Analysis</b>\n\n"
+    f"<b>Global Regime (8:30 AM):</b> {regime.get('regime', 'UNKNOWN') if os.path.exists(regime_file) else 'N/A'}\n"
+    f"<b>Nifty Regime (9:15 AM):</b> {regime_915}\n"
+    f"<b>Nifty Candle (9:30 AM):</b> {candle_data.get('pattern', 'Unknown')}\n\n"
+    f"<b>Calculation:</b>\n"
+    f"  • Regime multiplier: {regime_multiplier_915*100:.0f}%\n"
+    f"  • Candle slice: {slice_pct*100:.0f}%\n"
+    f"  • <b>Final Deployment: {REGIME_MULTIPLIER*100:.1f}%</b>\n\n"
+    f"⏳ Proceeding with stock screening..."
+)
+
+# Check deployment level (SOFT BLOCK - no sys.exit)
+DEPLOYMENT_ALLOWS_ENTRIES = (REGIME_MULTIPLIER >= 0.01)
+
+if not DEPLOYMENT_ALLOWS_ENTRIES:
+    print(f"🚫 SMART ENTRY: Deployment too low ({REGIME_MULTIPLIER*100:.1f}%) - Skipping new entries")
+    print(f"   Will check exits first")
+
+# ========== END SMART ENTRY VALIDATOR ==========
+
+
+# ========== COMBINED REGIME CHECK (ALL FLAGS) ==========
+# Combine all regime flags to determine if new entries are allowed
+ALLOW_NEW_ENTRIES = (
+    GLOBAL_ALLOW_NEW_ENTRIES and 
+    NIFTY_915_ALLOW_ENTRIES and 
+    CANDLE_PATTERN_VALID and 
+    CANDLE_ALLOWS_ENTRIES and 
+    DEPLOYMENT_ALLOWS_ENTRIES
+)
+
+print(f"\n💡 REGIME CHECK SUMMARY:")
+print(f"   Global regime: {'✅' if GLOBAL_ALLOW_NEW_ENTRIES else '❌'}")
+print(f"   Nifty 9:15 regime: {'✅' if NIFTY_915_ALLOW_ENTRIES else '❌'}")
+print(f"   Candle pattern valid: {'✅' if CANDLE_PATTERN_VALID else '❌'}")
+print(f"   Candle allows entries: {'✅' if CANDLE_ALLOWS_ENTRIES else '❌'}")
+print(f"   Deployment sufficient: {'✅' if DEPLOYMENT_ALLOWS_ENTRIES else '❌'}")
+print(f"   => ALLOW NEW ENTRIES: {'✅ YES' if ALLOW_NEW_ENTRIES else '❌ NO'}")
+
+if not ALLOW_NEW_ENTRIES:
+    print(f"\n🚫 Regime blocks new entries - Exits completed, skipping entry scan")
+    
+    # Send summary notification
+    send_telegram_message(
+        f"🚫 <b>DAILY Trading - No New Entries</b>\n\n"
+        f"<b>Global Regime (8:30 AM):</b> {regime.get('regime', 'UNKNOWN') if 'regime' in locals() else 'N/A'}\n"
+        f"<b>Nifty Regime (9:15 AM):</b> {regime_915 if 'regime_915' in locals() else 'N/A'}\n"
+        f"<b>Nifty Candle (9:30 AM):</b> {candle_data.get('pattern', 'Unknown') if 'candle_data' in locals() else 'N/A'}\n\n"
+        f"<b>Final Deployment:</b> {REGIME_MULTIPLIER*100:.1f}%\n\n"
+        f"✅ Exits completed\n"
+        f"❌ No new positions entered today"
+    )
+    
+    sys.exit(0)  # Exit after completing exits
+
+print(f"\n✅ Regime allows new entries - Proceeding with stock screening...")
+print(f"   Deployment level: {REGIME_MULTIPLIER*100:.1f}%")
+
+# ========== END COMBINED REGIME CHECK ==========
 
 # Load stocks from screened_stocks table
 print("\n📥 Loading stocks from NSE universe...")
@@ -255,6 +546,22 @@ else:
 signals_generated = []
 trades_today = []
 
+# Circuit Breaker FIRST (v8 fix: exit old positions before capital calculation)
+print("\n🛡️ Pre-Trading Circuit Breaker Check...")
+
+for _, row in portfolio[portfolio['Status'] == 'HOLD'].iterrows():
+    ticker = row['Ticker']
+    entry_price = float(row['EntryPrice'])
+    entry_date = row.get('EntryDate', datetime.now().strftime("%Y-%m-%d"))
+    qty = int(row['Quantity'])
+
+    # Calculate days held
+    entry_dt = pd.to_datetime(entry_date)
+    current_dt = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
+    days_held = calculate_trading_days(entry_dt, current_dt)  # Trading days (weekdays only)
+
+print(f"💰 POST-EXIT CHECK: {len(portfolio[portfolio['Status']=='HOLD'])} positions remain")
+
 print(f"\n🎯 Analyzing {len(stock_data)} stocks...")
 
 # Show which indicators are enabled
@@ -266,10 +573,29 @@ print()
 rs_analyzer = RelativeStrengthAnalyzer()
 rs_filtered_count = 0
 
+
+# SECTOR ROTATION ANALYSIS (before scanning for signals)
+print("📊 Calculating sector rotation rankings...")
+sector_ranking = get_sector_rotation_ranking(period='30d', benchmark='^NSEI')
+
+if sector_ranking:
+    print("\n📈 Sector Rankings (vs Nifty 50):")
+    sorted_sectors = sorted(sector_ranking.items(), key=lambda x: x[1]['rank'])
+    for sector, data in sorted_sectors[:5]:  # Show top 5
+        print(f"   #{data['rank']} {sector}: {data['relative_strength']:+.2f}%")
+    print(f"   ... ({len(sector_ranking)} sectors tracked)")
+else:
+    print("⚠️ Warning: Sector rotation data unavailable - proceeding without sector filter")
+
+# Track sector filter statistics
+sector_rotation_filtered = 0
+sector_peer_filtered = 0
+
 # PHASE 1: Collect all BUY signals (don't execute positions yet)
 print("🔍 PHASE 1: Scanning for BUY signals...")
 candidates_by_category = {'large_caps': [], 'mid_caps': [], 'micro_caps': []}
 sell_signals = []  # Track SELL signals for existing positions
+all_scores = {}  # Track scores for all stocks to save to DB
 
 for ticker, df in stock_data.items():
     if df.empty or len(df) < 60:
@@ -283,7 +609,10 @@ for ticker, df in stock_data.items():
             continue  # Skip weak stocks
 
         # Generate signal using v3 (configurable)
-        signal, score, details = generate_signal_daily(df, min_score=MIN_COMBINED_SCORE)
+        signal, score, details = generate_signal_daily(df, min_score=MIN_COMBINED_SCORE, use_guards=True)
+
+        # Save score and RS for ALL stocks (for re-entry use)
+        all_scores[ticker] = {'score': score, 'rs_rating': rs_rating}
 
         # Track signal
         if signal != "HOLD":
@@ -295,18 +624,6 @@ for ticker, df in stock_data.items():
                 'rs_rating': rs_rating
             })
             print(f"{ticker}: {signal} (Score: {score} | RS: {rs_rating})")
-
-        # Save score to screened_stocks table for intraday re-entry
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    UPDATE screened_stocks 
-                    SET score = %s, rs_rating = %s, category = %s
-                    WHERE ticker = %s AND last_updated = CURRENT_DATE
-                """, (int(score), rs_rating, stock_categories.get(ticker, 'Unknown'), ticker))
-        except Exception as e:
-            pass  # Silent fail - don't break execution
-            
 
         # Categorize BUY signals by market cap
         if signal == "BUY":
@@ -326,14 +643,41 @@ for ticker, df in stock_data.items():
             allocation_category = category_map.get(category)
 
             if allocation_category:
+                # SECTOR ROTATION CHECK: Only enter stocks from top 3 sectors
+                in_top_sector, sector_reason = is_sector_in_top_n(ticker, sector_ranking, top_n=3)
+                if not in_top_sector:
+                    sector_rotation_filtered += 1
+                    print(f"   ⏭️  {ticker}: Skipped - {sector_reason}")
+                    continue
+
+                # RELATIVE STRENGTH VS SECTOR PEERS CHECK
+                peer_check, peer_reason = check_relative_strength_vs_peers(ticker, stock_data, min_percentile=50)
+                if not peer_check:
+                    sector_peer_filtered += 1
+                    print(f"   ⏭️  {ticker}: Skipped - {peer_reason}")
+                    continue
+
+                print(f"   ✅ {ticker}: Sector checks passed - {sector_reason}, {peer_reason}")
+
                 # Calculate ATR for risk-based sizing
                 atr = calculate_atr(df, period=14)
                 atr_pct = (atr / float(df['Close'].iloc[-1])) * 100 if atr > 0 else 2.0
 
+                # Get current price (try regularMarketPrice if available, else Close)
+                try:
+                    ticker_obj = yf.Ticker(ticker)
+                    current_price = ticker_obj.info.get('regularMarketPrice') or ticker_obj.info.get('currentPrice')
+                    if current_price and current_price > 0:
+                        latest_price = float(current_price)
+                    else:
+                        latest_price = float(df['Close'].iloc[-1])  # Fallback to Close
+                except:
+                    latest_price = float(df['Close'].iloc[-1])  # Fallback to Close
+
                 candidates_by_category[allocation_category].append({
                     'ticker': ticker,
                     'score': score,
-                    'price': float(df['Close'].iloc[-1]),
+                    'price': latest_price,
                     'atr_pct': atr_pct,
                     'rs_rating': rs_rating,
                     'df': df  # Store for later use
@@ -352,6 +696,25 @@ for ticker, df in stock_data.items():
         print(f"⚠️ Error processing {ticker}: {e}")
         continue
 
+# Save all scores to database for re-entry use
+print(f"\n💾 Saving {len(all_scores)} stock scores to database...")
+saved_count = 0
+with get_db_cursor() as cur:
+    for ticker, data in all_scores.items():
+        try:
+            cur.execute("""
+                UPDATE screened_stocks
+                SET score = %s,
+                    rs_rating = %s,
+                    trading_mode = %s,
+                    screen_date = CURRENT_TIMESTAMP
+                WHERE ticker = %s AND last_updated = CURRENT_DATE
+            """, (data['score'], data['rs_rating'], TRADING_MODE, ticker))
+            saved_count += 1
+        except Exception as e:
+            print(f"⚠️ Error saving score for {ticker}: {e}")
+print(f"✅ Saved scores for {saved_count} stocks (Mode: {TRADING_MODE})")
+
 # Count candidates
 total_candidates = sum(len(v) for v in candidates_by_category.values())
 print(f"\n📊 BUY Signals Found: {total_candidates}")
@@ -359,6 +722,8 @@ print(f"   Large-caps: {len(candidates_by_category['large_caps'])}")
 print(f"   Mid-caps: {len(candidates_by_category['mid_caps'])}")
 print(f"   Micro-caps: {len(candidates_by_category['micro_caps'])}")
 print(f"   Stocks filtered by RS < {MIN_RS_RATING}: {rs_filtered_count}")
+print(f"   Stocks filtered by sector rotation (not in top 3): {sector_rotation_filtered}")
+print(f"   Stocks filtered by sector peer strength (< top 50%): {sector_peer_filtered}")
 print(f"   SELL Signals: {len(sell_signals)}")
 
 # PHASE 2: Process SELL signals first (close positions)
@@ -393,7 +758,8 @@ for sell in sell_signals:
                 price=current_price,
                 quantity=qty,
                 pnl=pnl,
-                notes=f"Exit signal (Score: {sell['score']})"
+                notes=f"Exit signal (Score: {sell['score']})",
+                trading_mode=TRADING_MODE
             )
 
             # Update local portfolio
@@ -443,7 +809,9 @@ if total_candidates > 0:
 
     # Check already deployed capital to prevent over-deployment
     deployed_capital = get_deployed_capital(strategy=STRATEGY)
-    available_capital = ACCOUNT_SIZE - deployed_capital
+    # Use get_available_cash() to account for losses (not just deployed)
+    from scripts.db_connection import get_available_cash
+    available_capital = get_available_cash(STRATEGY)
 
     print(f"\n💰 CAPITAL STATUS:")
     print(f"   Account Size:      ₹{ACCOUNT_SIZE:,.0f}")
@@ -490,13 +858,16 @@ if total_candidates > 0:
         total_capital=effective_capital,
         target_allocation={'large': 0.60, 'mid': 0.20, 'micro': 0.20},
         min_position_size=20000,  # Min ₹20K per position
-        max_position_size=100000,  # Max ₹100K per position
+        max_position_size=75000,  # Max ₹75K per position (reduced from 150K)
         min_score=MIN_SCORE,
         min_rs_rating=MIN_RS_RATING
     )
 
     # Get selected positions (already filtered and scored)
     selected_positions = select_positions_for_entry(allocation_plan)
+
+    # Calculate total allocated capital from Phase 3
+    total_allocated = sum(p.get('position_size', 0) or p.get('capital_allocated', 0) for p in selected_positions)
 
     # Send pre-trading Telegram notification with regime info
     if os.path.exists(regime_file):
@@ -509,9 +880,9 @@ if total_candidates > 0:
         pre_trade_msg = f"📊 <b>DAILY TRADING - Pre-Entry Summary</b>\n\n"
         pre_trade_msg += f"<b>Market Regime (8:30 AM):</b> {regime_name}\n"
         pre_trade_msg += f"<b>Regime Score:</b> {regime_score:.1f}\n\n"
-        pre_trade_msg += f"<b>Position Sizing:</b> {int(REGIME_MULTIPLIER*100)}% (Regime adjusted)\n"
+        pre_trade_msg += f"<b>Final Deployment Multiplier:</b> {REGIME_MULTIPLIER*100:.0f}%\n"
         pre_trade_msg += f"<b>Positions to Open:</b> {len(selected_positions)}\n"
-        pre_trade_msg += f"<b>Capital Deployment:</b> ₹{ACCOUNT_SIZE:,}\n\n"
+        pre_trade_msg += f"<b>Capital to Deploy:</b> ₹{total_allocated:,.0f}\n\n"
         pre_trade_msg += f"⏰ Opening positions now..."
 
         send_telegram_message(pre_trade_msg)
@@ -519,6 +890,7 @@ if total_candidates > 0:
     print(f"\n🔍 PHASE 4: Executing {len(selected_positions)} selected positions...")
 
     # Track available capital
+    available_capital = get_available_cash('DAILY')
     print(f"💰 Available capital: ₹{available_capital:,.0f}")
     positions_entered = 0
     capital_deployed = 0
@@ -526,10 +898,36 @@ if total_candidates > 0:
     # Execute selected positions
     for position in selected_positions:
         ticker = position['ticker']
+
+        # Check for existing position in SAME strategy (prevent duplicate entries)
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT entry_date
+                FROM positions
+                WHERE ticker = %s AND strategy = %s AND status = 'HOLD'
+            """, (ticker, STRATEGY))
+            existing = cur.fetchone()
+            
+            if existing:
+                print(f"   ⏭️  SKIPPING {ticker}: Already holding in {STRATEGY} (since {existing['entry_date']})")
+                continue
+
         score = position['score']
         yahoo_price = position.get('price')
-        capital_allocated = position['capital_allocated']
+        capital_allocated = position.get('position_size') or position.get('capital_allocated')
         df = position['df']
+
+        # SECTOR DIVERSIFICATION LIMIT CHECK (before position entry)
+        # Get current positions from portfolio
+        current_positions = portfolio.to_dict('records') if not portfolio.empty else []
+        sector_limit_ok, sector_limit_reason = check_sector_limit(ticker, current_positions, max_per_sector=MAX_POSITIONS_PER_SECTOR)
+
+        if not sector_limit_ok:
+            print(f"   ⏭️  SKIPPING {ticker}: {sector_limit_reason}")
+            continue
+        else:
+            sector = get_stock_sector(ticker)
+            print(f"   ✅ {ticker}: Sector limit OK - {sector_limit_reason}")
 
         # Safety check: Ensure yahoo_price is valid
         if not yahoo_price or not isinstance(yahoo_price, (int, float)):
@@ -546,17 +944,23 @@ if total_candidates > 0:
         atr = calculate_atr(df, period=14)
         stop_loss = price - (2 * atr) if atr > 0 else price * 0.98  # 2 ATR or 2%
 
-        # FIXED RISK POSITION SIZING (1% risk per trade)
-        # Position size = (Account × Risk%) / (Entry - Stop)
-        risk_amount = ACCOUNT_SIZE * RISK_PER_TRADE_PCT  # ₹5,000 at 1%
-        risk_per_share = price - stop_loss
+        # POSITION SIZING: Use Phase 3 allocated capital
+        # Phase 3 already calculated position sizes based on regime multiplier
+        if capital_allocated and capital_allocated > 0:
+            # Use Phase 3's allocated amount
+            qty = int(capital_allocated / price)
+            print(f"   📦 Using Phase 3 allocation: ₹{capital_allocated:,.0f} → {qty} shares")
+        else:
+            # Fallback to fixed risk (should rarely happen)
+            print(f"   ⚠️ No Phase 3 allocation found, using Fixed Risk fallback")
+            risk_amount = available_capital * RISK_PER_TRADE_PCT  # Use available capital, not account size
+            risk_per_share = price - stop_loss
 
-        if risk_per_share <= 0:
-            print(f"   ⚠️ SKIPPING {ticker}: Invalid stop loss (SL >= Entry)")
-            continue
+            if risk_per_share <= 0:
+                print(f"   ⚠️ SKIPPING {ticker}: Invalid stop loss (SL >= Entry)")
+                continue
 
-        # Calculate quantity based on fixed risk
-        qty = int(risk_amount / risk_per_share)
+            qty = int(risk_amount / risk_per_share)
 
         if qty == 0:
             print(f"   ⚠️ SKIPPING {ticker}: Position size too small (qty=0)")
@@ -571,7 +975,7 @@ if total_candidates > 0:
             continue
 
         # Check if position exceeds max position limit
-        max_position_value = ACCOUNT_SIZE * MAX_POSITION_PCT  # 20% of ₹500k = ₹100k max
+        max_position_value = ACCOUNT_SIZE * MAX_POSITION_PCT  # 15% of capital
         if position_value > max_position_value:
             # Scale down quantity to fit within limit
             qty = int(max_position_value / price)
@@ -579,7 +983,7 @@ if total_candidates > 0:
                 print(f"   ⚠️ SKIPPING {ticker}: Price too high for position limit")
                 continue
             position_value = qty * price
-            print(f"   ⚠️ Position capped at {qty} shares (₹{position_value:,.0f}) due to 20% limit (₹100k max)")
+            print(f"   ⚠️ Position capped at {qty} shares (₹{position_value:,.0f}) due to 15% limit")
 
         # Calculate take profit using Risk:Reward ratio OR fixed profit target
         # Use whichever comes FIRST (min) for quick exits
@@ -637,12 +1041,13 @@ if total_candidates > 0:
                 entry_date=datetime.now().strftime('%Y-%m-%d'),
                 ai_agrees=ai_agrees,
                 ai_confidence=ai_confidence,
-                ai_reasoning=ai_reasoning
+                ai_reasoning=ai_reasoning,
+                trading_mode=TRADING_MODE
             )
 
             # Debit capital for this position
             position_cost = price * qty
-            debit_capital(STRATEGY, position_cost)
+            debit_capital(STRATEGY, position_cost, TRADING_MODE)
 
             # Track capital deployed
             capital_deployed += position_cost
@@ -657,7 +1062,8 @@ if total_candidates > 0:
                 price=price,
                 quantity=qty,
                 pnl=0,
-                notes=f"Signal score: {score:.0f} | RS: {position.get('rs_rating', 'N/A')}"
+                notes=f"Signal score: {score:.0f} | RS: {position.get('rs_rating', 'N/A')}",
+                trading_mode=TRADING_MODE
             )
 
             # Add to local portfolio
@@ -695,73 +1101,14 @@ print(f"✅ Active positions: {num_positions}")
 from scripts.performance_tracker import update_results
 update_results(portfolio, stock_data)
 
-# Circuit Breaker Monitoring (4% alert / 5% hard stop)
-print("\n🛡️ Checking circuit breakers...")
+# Circuit Breaker Monitoring (4% alert / 5% hard stop only - max-hold already processed)
+print("\n🛡️ Checking stop-loss circuit breakers...")
 
 for _, row in portfolio[portfolio['Status'] == 'HOLD'].iterrows():
     ticker = row['Ticker']
     entry_price = float(row['EntryPrice'])
     entry_date = row.get('EntryDate', datetime.now().strftime("%Y-%m-%d"))
     qty = int(row['Quantity'])
-
-    # Calculate days held
-    entry_dt = pd.to_datetime(entry_date)
-    current_dt = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
-    days_held = (current_dt - entry_dt).days
-
-    # CHECK MAX HOLD FIRST (free up capital from dead positions)
-    # Note: Day-before warnings now handled by check_max_hold_warnings.py at 3 PM
-    if days_held >= MAX_HOLD_DAYS:
-        # Force exit due to max hold period
-        if ticker in stock_data and not stock_data[ticker].empty:
-            current_price = float(stock_data[ticker]['Close'].iloc[-1])
-        else:
-            print(f"  ⚠️ {ticker}: MAX-HOLD reached but no price data - skipping")
-            continue
-
-        pnl = (current_price - entry_price) * qty
-        pnl_pct = ((current_price - entry_price) / entry_price) * 100
-        pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-
-        print(f"  ⏰ MAX-HOLD: {ticker} @ ₹{current_price:.2f} | P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%) | {days_held}d")
-
-        # Send telegram alert
-        send_telegram_message(
-            f"{pnl_emoji} <b>MAX-HOLD EXIT</b>\n\n"
-            f"📊 Ticker: {ticker} ({STRATEGY})\n"
-            f"⏰ Reason: Held {days_held} days (max: {MAX_HOLD_DAYS})\n"
-            f"💰 P&L: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n\n"
-            f"<i>Freeing capital for new opportunities</i>"
-        )
-
-        # Close position and update capital
-        try:
-            close_position(ticker, STRATEGY, current_price, pnl)
-
-            # Credit back original investment
-            original_investment = entry_price * qty
-            credit_capital(STRATEGY, original_investment)
-
-            # Update capital with P&L
-            update_capital(STRATEGY, pnl)
-
-            log_trade(
-                ticker=ticker,
-                strategy=STRATEGY,
-                signal='SELL',
-                price=current_price,
-                quantity=qty,
-                pnl=pnl,
-                notes=f"MAX-HOLD exit after {days_held} days"
-            )
-
-            # Update local portfolio
-            portfolio.loc[portfolio['Ticker'] == ticker, 'Status'] = 'SOLD'
-            print(f"  ✅ Position exited: {ticker}")
-        except Exception as e:
-            print(f"  ❌ Failed to exit position: {e}")
-
-        continue  # Skip other checks for this position
 
     # Skip if on hold (check database)
     if is_position_on_hold(ticker, STRATEGY):
@@ -774,8 +1121,8 @@ for _, row in portfolio[portfolio['Status'] == 'HOLD'].iterrows():
         # Check circuit breaker (4% alert, 5% hard stop)
         action, loss, analysis = check_circuit_breaker(
             ticker, entry_price, current_price, entry_date,
-            alert_threshold=0.04,  # 4% alert
-            hard_stop=0.05  # 5% hard stop
+            alert_threshold=0.015,  # 1.5% AI analysis alert
+            hard_stop=0.025  # 2.5% circuit breaker
         )
 
         if action == 'CIRCUIT_BREAKER':
@@ -799,7 +1146,8 @@ for _, row in portfolio[portfolio['Status'] == 'HOLD'].iterrows():
                     price=current_price,
                     quantity=qty,
                     pnl=pnl,
-                    notes=f"Circuit breaker at {analysis['loss_pct']:.2f}%"
+                    notes=f"Circuit breaker at {analysis['loss_pct']:.2f}%",
+                    trading_mode=TRADING_MODE
                 )
             except Exception as e:
                 print(f"  ❌ Failed to exit position: {e}")
