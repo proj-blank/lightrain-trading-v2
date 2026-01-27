@@ -226,7 +226,7 @@ if os.path.exists(halt_file):
 print("\n📥 Loading portfolio and checking exits...")
 
 # Load existing positions
-positions = get_active_positions(STRATEGY)
+positions = get_active_positions(STRATEGY, TRADING_MODE)
 
 if positions:
     # Get tickers for price fetching
@@ -554,7 +554,7 @@ if not stock_data:
 
 # Load portfolio from database
 print("📥 Loading portfolio from database...")
-positions = get_active_positions(STRATEGY)
+positions = get_active_positions(STRATEGY, TRADING_MODE)
 
 # Convert to DataFrame format for compatibility with existing code
 portfolio_data = []

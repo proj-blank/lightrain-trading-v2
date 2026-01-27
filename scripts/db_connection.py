@@ -50,15 +50,27 @@ def get_db_cursor(cursor_factory=RealDictCursor):
 
 # ==================== POSITION MANAGEMENT ====================
 
-def get_active_positions(strategy: str = None) -> List[Dict]:
-    """Get all active positions, optionally filtered by strategy"""
+def get_active_positions(strategy: str = None, trading_mode: str = None) -> List[Dict]:
+    """Get all active positions, optionally filtered by strategy and trading_mode"""
     with get_db_cursor() as cur:
-        if strategy:
+        if strategy and trading_mode:
+            cur.execute("""
+                SELECT * FROM positions
+                WHERE status = 'HOLD' AND strategy = %s AND trading_mode = %s
+                ORDER BY entry_date DESC
+            """, (strategy, trading_mode))
+        elif strategy:
             cur.execute("""
                 SELECT * FROM positions
                 WHERE status = 'HOLD' AND strategy = %s
                 ORDER BY entry_date DESC
             """, (strategy,))
+        elif trading_mode:
+            cur.execute("""
+                SELECT * FROM positions
+                WHERE status = 'HOLD' AND trading_mode = %s
+                ORDER BY entry_date DESC
+            """, (trading_mode,))
         else:
             cur.execute("""
                 SELECT * FROM positions
