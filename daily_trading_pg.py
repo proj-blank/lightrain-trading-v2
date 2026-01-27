@@ -57,12 +57,37 @@ from scripts.sector_analysis import (
 
 def calculate_trading_days(start_date, end_date):
     """
-    Calculate number of trading days (weekdays only) between two dates
-    Excludes weekends (Saturday, Sunday)
+    Calculate number of ACTUAL trading days between two dates
+    Excludes weekends AND NSE market holidays
     Does NOT count the start date (only counts days HELD after entry)
     """
     import pandas as pd
     from datetime import timedelta
+    
+    # NSE Holidays 2026 (update annually)
+    NSE_HOLIDAYS_2026 = [
+        '2026-01-26',  # Republic Day
+        '2026-03-10',  # Maha Shivaratri
+        '2026-03-17',  # Holi
+        '2026-03-30',  # Id-ul-Fitr (tentative)
+        '2026-04-02',  # Ram Navami
+        '2026-04-03',  # Good Friday
+        '2026-04-06',  # Dr. Ambedkar Jayanti (observed)
+        '2026-04-14',  # Dr. Ambedkar Jayanti
+        '2026-05-01',  # May Day
+        '2026-06-06',  # Id-ul-Adha (Bakri Id) (tentative)
+        '2026-07-06',  # Muharram (tentative)
+        '2026-08-15',  # Independence Day
+        '2026-08-16',  # Parsi New Year
+        '2026-09-04',  # Milad-un-Nabi (tentative)
+        '2026-10-02',  # Mahatma Gandhi Jayanti
+        '2026-10-20',  # Dussehra
+        '2026-10-21',  # Dussehra (day 2)
+        '2026-11-09',  # Diwali (Lakshmi Puja)
+        '2026-11-10',  # Diwali Balipratipada
+        '2026-11-16',  # Gurunanak Jayanti
+        '2026-12-25',  # Christmas
+    ]
     
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
@@ -70,12 +95,17 @@ def calculate_trading_days(start_date, end_date):
     # Don't count the entry date itself, start from next day
     start_next = start + timedelta(days=1)
     
-    # Generate business days from day after start to end (inclusive)
-    if end >= start_next:
-        business_days = pd.bdate_range(start=start_next, end=end)
-        return len(business_days)
-    else:
+    if end < start_next:
         return 0  # Same day entry/exit
+    
+    # Generate business days (excludes weekends)
+    business_days = pd.bdate_range(start=start_next, end=end)
+    
+    # Exclude NSE holidays
+    holidays = pd.to_datetime(NSE_HOLIDAYS_2026)
+    trading_days = [d for d in business_days if d not in holidays]
+    
+    return len(trading_days)
 
 
 
@@ -638,7 +668,7 @@ for ticker, df in stock_data.items():
             category_map = {
                 'Large-cap': 'large_caps',
                 'Mid-cap': 'mid_caps',
-                'Micro-cap': 'micro_caps'
+                'Micro-cap': 'micro_caps', 'Microcap': 'micro_caps'
             }
             allocation_category = category_map.get(category)
 

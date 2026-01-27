@@ -1,47 +1,93 @@
 #!/usr/bin/env python3
 """
-THUNDER Strategy Pipeline
-Scans universe → Finds earnings → Runs Dexter → Picks top candidates
+THUNDER Strategy Pipeline - v2 with Phase 1 Improvements + Enhanced Telegram Reporting
+
+UNIVERSE: Uses screened_stocks (Large-cap + Mid-cap) for quality/liquidity
+Earnings-based fundamental strategy needs reliable earnings data and analyst coverage
 """
 import sys
 sys.path.insert(0, '/home/ubuntu/trading')
 
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from earnings_calendar import update_earnings_calendar, get_earnings_in_target_window
 from thunder_dexter_analyzer import analyze_thunder_candidate
-from thunder_entry import enter_thunder_position
+from thunder_entry import enter_thunder_position, MIN_DEXTER_SCORE, MIN_DAYS_TO_EARNINGS, MAX_DAYS_TO_EARNINGS, MAX_POSITIONS
 from scripts.db_connection import get_db_cursor
 from scripts.telegram_bot import send_telegram_message
 import pandas as pd
 import yfinance as yf
-
-# Stock universe (from your existing screening)
-LARGE_CAPS = ['TCS.NS', 'INFY.NS', 'HCLTECH.NS', 'WIPRO.NS', 'TECHM.NS',
-              'RELIANCE.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS',
-              'BHARTIARTL.NS', 'LT.NS', 'ASIANPAINT.NS', 'MARUTI.NS']
-
-MID_CAPS = ['MPHASIS.NS', 'PERSISTENT.NS', 'COFORGE.NS', 'LTTS.NS',
-            'BANKBARODA.NS', 'PNB.NS', 'INDUSINDBK.NS']
+import pytz
 
 
-# Market hours check (moved to function call)
+def is_market_open():
+    """Check if Indian stock market (NSE) is currently open"""
 
-def check_and_exit_profitable_positions():
-    """Check ACTIVE positions with 5%+ profit and exit them"""
+    # Check market hours (9:15 AM - 3:30 PM IST)
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist)
+    hour, minute = now.hour, now.minute
+
+    # Time check
+    market_hours_open = (hour == 9 and minute >= 15) or (9 < hour < 15) or (hour == 15 and minute <= 30)
+
+    if not market_hours_open:
+        return False, f"Outside market hours: {now.strftime('%I:%M %p IST')} (Market: 9:15 AM - 3:30 PM)"
+
+    # Holiday check
+    try:
+        nifty = yf.Ticker("^NSEI")
+        hist = nifty.history(period="2d")
+
+        if hist.empty:
+            return False, "No market data available (likely holiday)"
+
+        today_str = now.strftime('%Y-%m-%d')
+        dates_in_data = hist.index.strftime('%Y-%m-%d').tolist()
+
+        if today_str not in dates_in_data:
+            last_day = dates_in_data[-1] if dates_in_data else 'unknown'
+            return False, f"Market holiday detected (last trading day: {last_day})"
+
+        return True, f"Market open - {now.strftime('%I:%M %p IST')}"
+
+    except Exception as e:
+        print(f"⚠️ Warning: Could not verify holiday status ({e}). Proceeding with caution.")
+        return True, f"Market hours OK (holiday check failed)"
+
+
+# Exit logic moved to thunder_exit.py - keeping for reference
+# def check_and_exit_positions():
+    """Check ACTIVE positions for exit conditions:
+    
+    BEFORE EARNINGS:
+    - Stop loss: -10%
+    
+    AFTER EARNINGS:
+    - Stop loss: -5%
+    - OR max hold: 10 days after earnings date
+    
+    ALWAYS:
+    - Take profit: +5%
+    """
     print("\n" + "="*70)
-    print("💰 CHECKING ACTIVE POSITIONS FOR PROFIT TARGETS")
+    print("💰 CHECKING ACTIVE POSITIONS FOR EXIT CONDITIONS")
     print("="*70)
 
-    MIN_PROFIT_PCT = 5.0  # Exit if profit >= 5%
+    TAKE_PROFIT_PCT = 5.0
+    SL_BEFORE_EARNINGS = -10.0
+    SL_AFTER_EARNINGS = -5.0
+    MAX_DAYS_AFTER_EARNINGS = 10
 
     try:
         with get_db_cursor() as cur:
-            # Get all ACTIVE THUNDER positions from positions table
+            # Join with earnings_calendar to get earnings_date
             cur.execute("""
-                SELECT ticker, entry_date, entry_price, quantity
-                FROM positions
-                WHERE status = 'HOLD' AND strategy = 'THUNDER'
-                ORDER BY entry_date DESC
+                SELECT p.ticker, p.entry_date, p.entry_price, p.quantity,
+                       ec.earnings_date
+                FROM positions p
+                LEFT JOIN earnings_calendar ec ON p.ticker = ec.ticker
+                WHERE p.status = 'HOLD' AND p.strategy = 'THUNDER'
+                ORDER BY p.entry_date DESC
             """)
             positions = cur.fetchall()
 
@@ -52,13 +98,15 @@ def check_and_exit_profitable_positions():
             print(f"📊 Found {len(positions)} active position(s)\n")
 
             exited = 0
+            holding_positions = []  # Track positions still held for telegram summary
+            
             for pos in positions:
                 ticker = pos['ticker']
                 entry_price = float(pos['entry_price'])
                 quantity = int(pos['quantity'])
                 entry_date = pos['entry_date']
+                earnings_date = pos['earnings_date']
 
-                # Get current price
                 try:
                     stock = yf.Ticker(ticker)
                     hist = stock.history(period='1d')
@@ -70,13 +118,47 @@ def check_and_exit_profitable_positions():
                     pnl = (current_price - entry_price) * quantity
                     pnl_pct = ((current_price - entry_price) / entry_price) * 100
 
-                    print(f"📈 {ticker}: Entry ₹{entry_price:.2f} → Current ₹{current_price:.2f} ({pnl_pct:+.2f}%)")
+                    # Parse earnings date
+                    if earnings_date:
+                        if isinstance(earnings_date, str):
+                            earnings_date = datetime.strptime(earnings_date, '%Y-%m-%d').date()
+                    
+                    # Determine if earnings has passed
+                    earnings_passed = earnings_date and date.today() > earnings_date
+                    days_since_earnings = (date.today() - earnings_date).days if earnings_passed else None
+                    days_to_earnings = (earnings_date - date.today()).days if earnings_date and not earnings_passed else None
 
-                    # Check if profit target hit
-                    if pnl_pct >= MIN_PROFIT_PCT:
-                        print(f"   ✅ PROFIT TARGET HIT! Exiting position...")
+                    # Display status
+                    print(f"📊 {ticker}: Entry ₹{entry_price:.2f} → Current ₹{current_price:.2f} ({pnl_pct:+.2f}%)")
+                    if earnings_date:
+                        if earnings_passed:
+                            print(f"   Earnings: {earnings_date} (PASSED - {days_since_earnings} days ago)")
+                            print(f"   Rules: SL={SL_AFTER_EARNINGS}% or MaxHold={MAX_DAYS_AFTER_EARNINGS}d")
+                        else:
+                            print(f"   Earnings: {earnings_date} ({days_to_earnings} days away)")
+                            print(f"   Rules: SL={SL_BEFORE_EARNINGS}% (pre-earnings)")
 
-                        # Update positions table (same as DAILY/SWING strategies)
+                    exit_reason = None
+
+                    # 1. Take profit (always applies)
+                    if pnl_pct >= TAKE_PROFIT_PCT:
+                        exit_reason = f"Profit target hit ({pnl_pct:.1f}% >= {TAKE_PROFIT_PCT}%)"
+
+                    # 2. Check stop loss based on earnings status
+                    elif earnings_passed:
+                        # AFTER EARNINGS: tighter stop loss or max hold
+                        if pnl_pct <= SL_AFTER_EARNINGS:
+                            exit_reason = f"Post-earnings stop loss ({pnl_pct:.1f}% <= {SL_AFTER_EARNINGS}%)"
+                        elif days_since_earnings >= MAX_DAYS_AFTER_EARNINGS:
+                            exit_reason = f"Max hold exceeded ({days_since_earnings} days after earnings)"
+                    else:
+                        # BEFORE EARNINGS: wider stop loss
+                        if pnl_pct <= SL_BEFORE_EARNINGS:
+                            exit_reason = f"Pre-earnings stop loss ({pnl_pct:.1f}% <= {SL_BEFORE_EARNINGS}%)"
+
+                    if exit_reason:
+                        print(f"   ✅ EXIT TRIGGERED: {exit_reason}")
+
                         cur.execute("""
                             UPDATE positions
                             SET status = 'CLOSED',
@@ -89,8 +171,8 @@ def check_and_exit_profitable_positions():
                               AND status = 'HOLD'
                         """, (current_price, pnl, ticker, entry_date))
 
-                        # Send Telegram alert
                         emoji = "📈" if pnl > 0 else "📉"
+                        earnings_status = "PASSED" if earnings_passed else f"{days_to_earnings}d away"
                         send_telegram_message(f"""⚡ <b>THUNDER POSITION CLOSED</b>
 
 {emoji} <b>{ticker}</b>
@@ -99,82 +181,169 @@ def check_and_exit_profitable_positions():
 💵 PnL: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)
 
 📅 Entry: {entry_date}
-📅 Exit: {datetime.now().date()}
+📅 Exit: {date.today()}
+📅 Earnings: {earnings_date} ({earnings_status})
 
-💭 <b>Reason:</b> Profit target hit ({pnl_pct:.1f}% >= {MIN_PROFIT_PCT}%)
+💭 <b>Reason:</b> {exit_reason}
 """, parse_mode='HTML')
 
                         print(f"   📱 Telegram alert sent")
                         print(f"   ✅ Position closed! PnL: ₹{pnl:,.0f}\n")
                         exited += 1
                     else:
-                        print(f"   ⏰ Holding (target {MIN_PROFIT_PCT}% not reached)\n")
+                        print(f"   ⏰ Holding - no exit condition met\n")
+                        # Track for summary
+                        holding_positions.append({
+                            'ticker': ticker,
+                            'pnl_pct': pnl_pct,
+                            'days_to_earnings': days_to_earnings,
+                            'days_since_earnings': days_since_earnings,
+                            'earnings_passed': earnings_passed,
+                            'earnings_date': earnings_date
+                        })
 
                 except Exception as e:
                     print(f"⚠️ {ticker}: Error checking position: {e}\n")
                     continue
 
             if exited > 0:
-                print(f"✅ Exited {exited} profitable position(s)\n")
+                print(f"✅ Exited {exited} position(s)\n")
             else:
-                print(f"ℹ️ No positions met profit target\n")
+                print(f"ℹ️ No positions met exit conditions\n")
+
+            # Send telegram summary of open positions
+            if holding_positions:
+                pos_lines = []
+                for hp in holding_positions:
+                    emoji = "📈" if hp['pnl_pct'] > 0 else "📉" if hp['pnl_pct'] < 0 else "➡️"
+                    if hp['earnings_passed']:
+                        earnings_info = f"{hp['days_since_earnings']}d after earnings"
+                    else:
+                        earnings_info = f"{hp['days_to_earnings']}d to earnings"
+                    pos_lines.append(f"{emoji} <b>{hp['ticker']}</b>: {hp['pnl_pct']:+.1f}% | {earnings_info}")
+                
+                send_telegram_message(f"""⚡ <b>THUNDER POSITIONS STATUS</b>
+
+📊 <b>Open Positions: {len(holding_positions)}</b>
+
+{chr(10).join(pos_lines)}
+
+<i>Exit rules:</i>
+• Pre-earnings: SL {SL_BEFORE_EARNINGS}%
+• Post-earnings: SL {SL_AFTER_EARNINGS}% or {MAX_DAYS_AFTER_EARNINGS}d max hold
+• Always: TP +{TAKE_PROFIT_PCT}%
+""", parse_mode='HTML')
 
             return exited
 
     except Exception as e:
         print(f"❌ Error checking positions: {e}\n")
+        import traceback
+        traceback.print_exc()
         return 0
 
 def run_thunder_pipeline():
     """Complete THUNDER strategy pipeline"""
 
-    # MARKET HOURS CHECK
-    from datetime import datetime
-    import pytz
-    ist = pytz.timezone("Asia/Kolkata")
-    now = datetime.now(ist)
-    hour, minute = now.hour, now.minute
-    is_market_open = ((hour == 9 and minute >= 15) or (9 < hour < 15) or (hour == 15 and minute <= 30))
-
     print("⚡" * 35)
-    print("⚡ THUNDER STRATEGY PIPELINE ⚡")
+    print("⚡ THUNDER STRATEGY PIPELINE v2 ⚡")
     print("⚡" * 35)
 
-    if is_market_open:
-        print(f"✅ Market Open - {now.strftime('%I:%M %p IST')}")
+    is_open, reason = is_market_open()
+
+    if is_open:
+        print(f"✅ {reason}")
     else:
-        print(f"⚠️ Market Closed - {now.strftime('%I:%M %p IST')} (Hours: 9:15 AM - 3:30 PM)")
-        print("⚠️ Will only check for profit exits, skipping new entries")
+        print(f"❌ Market Closed - {reason}")
+        print("⚠️ Will only check for exits, skipping new entries")
 
-    # Step 0: Check and exit profitable positions FIRST (frees up capital)
-    # This runs even if market is closed (uses yesterday's closing prices)
-    check_and_exit_profitable_positions()
+    # Exit logic moved to thunder_exit.py (runs at 11 AM)
 
-    # Only proceed with new entries if market is open
-    if not is_market_open:
+    if not is_open:
         print("\n❌ Skipping new entries - market closed")
         return
 
-    # Step 1: Load universe
-    universe = LARGE_CAPS + MID_CAPS
-    print(f"\n📊 Stock Universe: {len(universe)} stocks")
+    # Load QUALITY universe: Large-cap + Mid-cap from screened_stocks
+    print(f"\n📊 Loading THUNDER universe (ALL screened stocks (Dexter will filter quality))...")
 
-    # Step 2: Update earnings calendar
-    print(f"\n📅 Updating earnings calendar...")
+    try:
+        with get_db_cursor() as cur:
+            # Get all screened stocks from morning run (last 7 days)
+            cur.execute("""
+                SELECT ticker, category
+                FROM screened_stocks
+                WHERE 1=1
+                  AND last_updated >= CURRENT_DATE - INTERVAL '7 days'
+                ORDER BY category, ticker
+            """)
+            results = cur.fetchall()
+
+            if not results:
+                error_msg = "❌ No screened stocks in screened_stocks. Run stocks_screening.py first."
+                print(error_msg)
+                send_telegram_message(error_msg)
+                return
+
+            universe = [row['ticker'] for row in results]
+            large_cap_count = sum(1 for r in results if r['category'] == 'Large-cap')
+            mid_cap_count = sum(1 for r in results if r['category'] == 'Mid-cap')
+
+            print(f"✅ Loaded {len(universe)} quality stocks:")
+            print(f"   Large-cap: {large_cap_count} stocks")
+            print(f"   Mid-cap: {mid_cap_count} stocks")
+
+            # Send initial scan telegram message
+            send_telegram_message(f"""⚡ <b>THUNDER SCAN STARTED</b>
+
+📊 <b>Universe:</b> {len(universe)} stocks
+   • Large-cap: {large_cap_count}
+   • Mid-cap: {mid_cap_count}
+
+⏳ Scanning for earnings opportunities...
+""", parse_mode='HTML')
+
+    except Exception as e:
+        error_msg = f"❌ Error loading universe: {e}"
+        print(error_msg)
+        send_telegram_message(error_msg)
+        return
+
+    print(f"\n📅 Updating earnings calendar for {len(universe)} stocks...")
     update_earnings_calendar(universe)
 
-    # Step 3: Find earnings in target window (25-40 days)
-    print(f"\n🎯 Finding earnings in 25-40 day window...")
-    opportunities = get_earnings_in_target_window(min_days=25, max_days=40)
+    print(f"\n🎯 Finding earnings in {MIN_DAYS_TO_EARNINGS}-{MAX_DAYS_TO_EARNINGS} day window...")
+    opportunities = get_earnings_in_target_window(min_days=MIN_DAYS_TO_EARNINGS, max_days=MAX_DAYS_TO_EARNINGS)
 
     if opportunities.empty:
+        msg = f"""⚡ <b>THUNDER SCAN COMPLETE</b>
+
+❌ <b>No Opportunities Found</b>
+
+Scanned {len(universe)} stocks
+No earnings in {MIN_DAYS_TO_EARNINGS}-{MAX_DAYS_TO_EARNINGS} day window
+
+<i>Check back tomorrow for new opportunities</i>
+"""
         print("\n❌ No earnings in target window")
+        send_telegram_message(msg, parse_mode='HTML')
         return
 
     print(f"\n✅ Found {len(opportunities)} earnings opportunities")
 
-    # Step 4: Run Dexter analysis on each
+    # Send earnings window results
+    earnings_tickers = opportunities['ticker'].tolist()
+    send_telegram_message(f"""⚡ <b>THUNDER - Earnings Window Filter</b>
+
+✅ Found {len(opportunities)} stocks with earnings in {MIN_DAYS_TO_EARNINGS}-{MAX_DAYS_TO_EARNINGS} days:
+
+{', '.join(earnings_tickers[:10])}{'...' if len(earnings_tickers) > 10 else ''}
+
+⏳ Running Dexter analysis on candidates...
+""", parse_mode='HTML')
+
+    # Run Dexter analysis
     results = []
+    failed_analyses = []
 
     for _, opp in opportunities.iterrows():
         ticker = opp['ticker']
@@ -184,156 +353,116 @@ def run_thunder_pipeline():
         print(f"Analyzing: {ticker}")
 
         analysis = analyze_thunder_candidate(ticker, earnings_date)
-
         if analysis:
             results.append(analysis)
+        else:
+            failed_analyses.append(ticker)
 
-    # Step 5: Rank by Dexter score
     if not results:
+        msg = f"""⚡ <b>THUNDER SCAN COMPLETE</b>
+
+📊 Scanned: {len(universe)} stocks
+📅 Earnings window: {len(opportunities)} candidates
+❌ Dexter analysis: 0 passed
+
+<b>All candidates failed analysis</b>
+Failed: {', '.join(failed_analyses[:5])}{'...' if len(failed_analyses) > 5 else ''}
+
+<i>No positions entered today</i>
+"""
         print("\n❌ No successful analyses")
+        send_telegram_message(msg, parse_mode='HTML')
         return
 
     df = pd.DataFrame(results)
     df = df.sort_values('dexter_score', ascending=False)
 
     print(f"\n{'='*70}")
-    print("⚡ TOP THUNDER CANDIDATES ⚡")
+    print("⚡ TOP THUNDER CANDIDATES (v2 Scoring) ⚡")
     print(f"{'='*70}\n")
 
+    # Show top candidates
+    top_candidates_msg = ""
     for i, row in df.head(5).iterrows():
+        accel = "✅" if row.get('is_accelerating') else "❌"
         print(f"{row['dexter_score']}/100  {row['ticker']:15}  {row['recommendation']:12}  "
-              f"Earnings: {row['earnings_date']}  ({row['days_to_earnings']} days)")
+              f"Accel:{accel}  Earnings: {row['earnings_date']}  ({row['days_to_earnings']} days)")
         print(f"         {row['reasoning'][:80]}...")
         print()
 
-    # Step 6: Select diversified positions with existing holdings check
+        top_candidates_msg += f"\n{row['ticker']:10} | Score: {row['dexter_score']}/100 | {row['recommendation']} | Accel:{accel}"
+
+    # Send Dexter results summary
+    send_telegram_message(f"""⚡ <b>THUNDER - Dexter Analysis Results</b>
+
+✅ <b>Passed Analysis: {len(results)}/{len(opportunities)}</b>
+
+<b>Top 5 Candidates:</b>{top_candidates_msg}
+
+⏳ Attempting position entries...
+""", parse_mode='HTML')
+
+    # Get current positions count
+    active_count = 0
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT COUNT(*) as cnt FROM positions WHERE status='HOLD' AND strategy='THUNDER'")
+            active_count = cur.fetchone()['cnt']
+    except:
+        pass
+
+    # Select and enter positions
     print(f"\n{'='*70}")
-    print("⚡ SECTOR-DIVERSIFIED POSITION SELECTION ⚡")
+    print("⚡ POSITION SELECTION ⚡")
     print(f"{'='*70}\n")
-
-    THUNDER_CAPITAL = 500000  # ₹5L total capital
-    MAX_SECTOR_ALLOCATION_PCT = 50  # Max 50% per sector
-
-    # Get existing THUNDER holdings with sector info
-    with get_db_cursor() as cur:
-        cur.execute("""
-            SELECT ticker, COUNT(*) as position_count
-            FROM positions
-            WHERE strategy='THUNDER' AND status='HOLD'
-            GROUP BY ticker
-        """)
-        existing_holdings = {row['ticker']: row['position_count'] for row in cur.fetchall()}
-
-        # Get current capital deployed by sector
-        cur.execute("""
-            SELECT ticker, entry_price * quantity as deployed
-            FROM positions
-            WHERE strategy='THUNDER' AND status='HOLD'
-        """)
-        deployed_positions = cur.fetchall()
-
-    # Calculate sector allocations
-    sector_deployed = {}
-    for pos in deployed_positions:
-        ticker = pos['ticker']
-        deployed = float(pos['deployed'])
-
-        # Find sector from df results
-        ticker_sector = df[df['ticker'] == ticker]['sector'].iloc[0] if ticker in df['ticker'].values else 'Unknown'
-        sector_deployed[ticker_sector] = sector_deployed.get(ticker_sector, 0) + deployed
-
-    print(f"📊 Current Capital Deployment by Sector:")
-    for sector, deployed in sorted(sector_deployed.items(), key=lambda x: x[1], reverse=True):
-        pct = (deployed / THUNDER_CAPITAL) * 100
-        print(f"   {sector}: ₹{deployed:,.0f} ({pct:.1f}%)")
-
-    print(f"\n📊 Existing Holdings by Stock:")
-    if existing_holdings:
-        for ticker, count in existing_holdings.items():
-            print(f"   {ticker}: {count} position(s)")
-    else:
-        print(f"   (none)")
-
-    # Filter out stocks we already have 2+ positions in
-    MAX_POSITIONS_PER_STOCK = 2
-    df_filtered = df[df['ticker'].apply(lambda t: existing_holdings.get(t, 0) < MAX_POSITIONS_PER_STOCK)]
-
-    if len(df_filtered) < len(df):
-        excluded = set(df['ticker']) - set(df_filtered['ticker'])
-        print(f"\n⚠️ Excluded {len(excluded)} stock(s) (already have {MAX_POSITIONS_PER_STOCK}+ positions):")
-        for ticker in excluded:
-            print(f"   - {ticker} ({existing_holdings.get(ticker, 0)} positions)")
-
-    if df_filtered.empty:
-        print(f"\n❌ No new candidates after filtering existing holdings")
-        return
-
-    # CRITICAL: Filter out sectors that already have 50%+ capital deployed
-    max_sector_capital = THUNDER_CAPITAL * (MAX_SECTOR_ALLOCATION_PCT / 100)
-    overallocated_sectors = {sector for sector, deployed in sector_deployed.items()
-                              if deployed >= max_sector_capital}
-
-    if overallocated_sectors:
-        print(f"\n🚫 Sectors at MAX allocation ({MAX_SECTOR_ALLOCATION_PCT}% = ₹{max_sector_capital:,.0f}):")
-        for sector in overallocated_sectors:
-            deployed = sector_deployed[sector]
-            pct = (deployed / THUNDER_CAPITAL) * 100
-            print(f"   {sector}: ₹{deployed:,.0f} ({pct:.1f}%) - SKIPPING")
-
-        # Filter out these sectors
-        df_filtered = df_filtered[~df_filtered['sector'].isin(overallocated_sectors)]
-
-        if df_filtered.empty:
-            print(f"\n❌ No candidates after sector allocation filter")
-            print(f"   All available stocks are from overallocated sectors.")
-            print(f"   Waiting for next run to find stocks from other sectors...")
-            return
-
-    # Group by sector and get top 2 sectors
-    sector_counts = df_filtered['sector'].value_counts()
-    print(f"\n📊 Sector Distribution (after all filters):")
-    for sector, count in sector_counts.items():
-        current_deployed = sector_deployed.get(sector, 0)
-        current_pct = (current_deployed / THUNDER_CAPITAL) * 100
-        print(f"   {sector}: {count} candidate(s) | Current: ₹{current_deployed:,.0f} ({current_pct:.1f}%)")
-
-    selected = []
-    MAX_PER_SECTOR = 2  # Max 2 positions per sector per run
-
-    # Strategy: 2 from top sector + 2 from second sector = 4 total (but respect max 2 per sector)
-    if len(sector_counts) >= 2:
-        top_sectors = sector_counts.index[:2]  # Top 2 sectors
-
-        for sector in top_sectors:
-            sector_df = df_filtered[df_filtered['sector'] == sector].head(MAX_PER_SECTOR)
-            selected.extend(sector_df.to_dict('records'))
-            print(f"\n✅ Selected {len(sector_df)} from {sector}:")
-            for idx, row in sector_df.iterrows():
-                print(f"   - {row['ticker']:15} (Score: {row['dexter_score']}/100)")
-
-    elif len(sector_counts) == 1:
-        # Only 1 sector available, respect max 2 per sector rule
-        print(f"\n⚠️ Only 1 sector available, selecting max {MAX_PER_SECTOR} candidates (diversification constraint)")
-        selected = df_filtered.head(MAX_PER_SECTOR).to_dict('records')
-        for row in selected:
-            print(f"   - {row['ticker']:15} (Score: {row['dexter_score']}/100)")
-
-    else:
-        print(f"\n❌ No candidates available")
-        return
-
-    # Step 7: Enter selected positions
-    print(f"\n{'='*70}")
-    print("⚡ AUTO-ENTERING DIVERSIFIED POSITIONS ⚡")
-    print(f"{'='*70}\n")
+    print(f"Current THUNDER positions: {active_count}/{MAX_POSITIONS}")
 
     entered = 0
-    for position in selected:
-        if enter_thunder_position(position):
+    rejected = []
+
+    # Simple approach: Take top 4 candidates that pass all filters
+    for _, row in df.head(10).iterrows():  # Check top 10
+        if entered >= 4:  # Target 4 positions
+            break
+
+        ticker = row['ticker']
+        score = row['dexter_score']
+
+        if enter_thunder_position(row.to_dict()):
             entered += 1
+        else:
+            rejected.append({'ticker': ticker, 'score': score})
 
-    print(f"\n✅ Entered {entered} THUNDER positions (Target: 4)")
+    # Final summary telegram message
+    summary_msg = f"""⚡ <b>THUNDER SCAN COMPLETE</b>
 
+📊 <b>Scan Results:</b>
+   • Total universe: {len(universe)} stocks
+   • Earnings window: {len(opportunities)} candidates
+   • Dexter passed: {len(results)} stocks
+
+💼 <b>Position Entry:</b>
+   • Entered: {entered} positions
+   • Rejected: {len(rejected)} (filters/limits)
+   • Active positions: {active_count + entered}/{MAX_POSITIONS}
+"""
+
+    if rejected:
+        summary_msg += "\n<b>Rejected candidates:</b>\n"
+        for r in rejected[:5]:
+            summary_msg += f"   • {r['ticker']} (Score: {r['score']})\n"
+
+    if entered == 0:
+        summary_msg += "\n<i>Possible reasons:</i>\n"
+        summary_msg += f"   • Max positions reached ({MAX_POSITIONS})\n"
+        summary_msg += f"   • Scores below {MIN_DEXTER_SCORE}\n"
+        summary_msg += f"   • Outside {MIN_DAYS_TO_EARNINGS}-{MAX_DAYS_TO_EARNINGS} day window\n"
+        summary_msg += "   • Weak sector performance\n"
+        summary_msg += "   • Insufficient capital\n"
+
+    send_telegram_message(summary_msg, parse_mode='HTML')
+
+    print(f"\n✅ Entered {entered} THUNDER positions")
     return df
 
 if __name__ == "__main__":

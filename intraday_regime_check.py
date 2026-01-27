@@ -35,9 +35,12 @@ def send_telegram(message):
             "text": message,
             "parse_mode": "HTML"
         }
-        requests.post(url, data=data, timeout=10)
+        resp = requests.post(url, data=data, timeout=10)
+        print(f"Telegram API response: {resp.status_code} - {resp.text[:200]}")
     except Exception as e:
         print(f"Telegram send failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 def get_angel_session():
     """Create AngelOne session"""
@@ -93,6 +96,44 @@ def check_intraday_regime():
                 print(f"India VIX: {vix_ltp:.2f} ({vix_level} FEAR)")
         except Exception as e:
             print(f"VIX fetch failed: {e}")
+
+        # Fetch global markets
+        print()
+        print("Global Markets:")
+        
+        import yfinance as yf
+        global_data = {}
+        
+        try:
+            sp = yf.Ticker('ES=F')
+            sp_hist = sp.history(period='2d')
+            if len(sp_hist) >= 2:
+                sp_change = ((sp_hist['Close'].iloc[-1] / sp_hist['Close'].iloc[-2]) - 1) * 100
+                emoji = "🟢" if sp_change >= 0 else "🔴"
+                print(f"  {emoji} S&P Futures: {sp_change:+.2f}%")
+                global_data['sp_futures'] = sp_change
+        except: pass
+        
+        try:
+            nikkei = yf.Ticker('^N225')
+            nikkei_hist = nikkei.history(period='5d')
+            if len(nikkei_hist) >= 2:
+                nikkei_change = ((nikkei_hist['Close'].iloc[-1] / nikkei_hist['Close'].iloc[-2]) - 1) * 100
+                emoji = "🟢" if nikkei_change >= 0 else "🔴"
+                print(f"  {emoji} Nikkei: {nikkei_change:+.2f}%")
+                global_data['nikkei'] = nikkei_change
+        except: pass
+        
+        try:
+            gold = yf.Ticker('GC=F')
+            gold_hist = gold.history(period='2d')
+            if len(gold_hist) >= 2:
+                gold_change = ((gold_hist['Close'].iloc[-1] / gold_hist['Close'].iloc[-2]) - 1) * 100
+                emoji = "🟢" if gold_change < 0 else "🔴"
+                print(f"  {emoji} Gold: {gold_change:+.2f}% (inverse)")
+                global_data['gold'] = gold_change
+        except: pass
+
 
         # Check all 3 indices
         indices = [

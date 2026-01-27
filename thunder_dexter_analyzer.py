@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Dexter-Lite Fundamental Analyzer
+Dexter-Lite Fundamental Analyzer - v2 with Phase 1 Improvements
 
-Uses FREE data sources (yfinance) instead of paid Financial Datasets API
-Provides 80% of Dexter's value at 0% data cost
+PHASE 1 ENHANCEMENTS:
+- Added earnings acceleration score (20 points)
+- Reweighted scoring to emphasize earnings momentum
+- Uses FREE data sources (yfinance) instead of paid Financial Datasets API
+- Provides 80% of Dexter's value at 0% data cost
 
-Cost: Only OpenAI API (~$0.01-0.03 per analysis)
+Cost: Only OpenAI API (~/bin/zsh.01-0.03 per analysis)
 """
 
 import os
@@ -27,7 +30,7 @@ def fetch_financial_metrics(ticker):
     Fetch fundamental metrics using yfinance (FREE)
 
     Returns:
-        dict with financial metrics
+        dict with financial metrics including quarterly earnings history
     """
     try:
         stock = yf.Ticker(ticker)
@@ -36,6 +39,7 @@ def fetch_financial_metrics(ticker):
         info = stock.info
         financials = stock.quarterly_financials  # Last 4 quarters
         balance_sheet = stock.quarterly_balance_sheet
+        # earnings = stock.quarterly_earnings  # DEPRECATED - using quarterly_income_stmt instead
 
         # Calculate key metrics
         metrics = {
@@ -74,7 +78,7 @@ def fetch_financial_metrics(ticker):
         }
 
         # Calculate quarterly revenue trend (growth trajectory)
-        if not financials.empty and 'Total Revenue' in financials.index:
+        if financials is not None and not financials.empty and 'Total Revenue' in financials.index:
             revenues = financials.loc['Total Revenue'].dropna()
             if len(revenues) >= 4:
                 # QoQ growth rate
@@ -86,6 +90,60 @@ def fetch_financial_metrics(ticker):
                 metrics['avg_qoq_revenue_growth'] = sum(qoq_growth) / len(qoq_growth) if qoq_growth else 0
                 metrics['revenue_trend'] = 'GROWING' if metrics['avg_qoq_revenue_growth'] > 0 else 'DECLINING'
 
+        # PHASE 1: Calculate earnings acceleration using quarterly_income_stmt
+        # (quarterly_earnings is deprecated in yfinance)
+        quarterly_income = stock.quarterly_income_stmt
+        if quarterly_income is not None and not quarterly_income.empty:
+            # Try Diluted EPS first, then Basic EPS, then Net Income
+            eps_values = None
+            eps_source = None
+            
+            if 'Diluted EPS' in quarterly_income.index:
+                eps_values = quarterly_income.loc['Diluted EPS'].dropna()
+                eps_source = 'Diluted EPS'
+            elif 'Basic EPS' in quarterly_income.index:
+                eps_values = quarterly_income.loc['Basic EPS'].dropna()
+                eps_source = 'Basic EPS'
+            elif 'Net Income' in quarterly_income.index:
+                # Use Net Income as fallback (not per-share but still shows growth)
+                eps_values = quarterly_income.loc['Net Income'].dropna()
+                eps_source = 'Net Income'
+            
+            if eps_values is not None and len(eps_values) >= 3:
+                # Calculate QoQ growth rates (most recent first in yfinance)
+                qoq_eps_growth = []
+                eps_list = list(eps_values.values)[:4]  # Last 4 quarters
+                
+                for i in range(len(eps_list) - 1):
+                    current = eps_list[i]
+                    previous = eps_list[i + 1]
+                    if previous != 0 and not pd.isna(previous) and not pd.isna(current):
+                        growth = ((current - previous) / abs(previous)) * 100
+                        qoq_eps_growth.append(growth)
+                
+                # Check for acceleration: EPS growing AND growth rate increasing
+                # Acceleration = each quarter's growth rate > previous quarter's growth rate
+                acceleration_count = 0
+                if len(qoq_eps_growth) >= 2:
+                    for i in range(len(qoq_eps_growth) - 1):
+                        # qoq_eps_growth[0] is most recent, so we check if recent > older
+                        if qoq_eps_growth[i] > qoq_eps_growth[i + 1]:
+                            acceleration_count += 1
+                
+                metrics['earnings_acceleration_quarters'] = acceleration_count
+                metrics['qoq_eps_growth'] = qoq_eps_growth
+                metrics['eps_source'] = eps_source
+                # Accelerating if at least 1 quarter of increasing growth rate AND positive recent growth
+                metrics['is_accelerating'] = acceleration_count >= 1 and (qoq_eps_growth[0] > 0 if qoq_eps_growth else False)
+            else:
+                metrics['earnings_acceleration_quarters'] = 0
+                metrics['is_accelerating'] = False
+                metrics['eps_source'] = None
+        else:
+            metrics['earnings_acceleration_quarters'] = 0
+            metrics['is_accelerating'] = False
+            metrics['eps_source'] = None
+
         return metrics
 
     except Exception as e:
@@ -96,13 +154,17 @@ def fetch_financial_metrics(ticker):
 def calculate_dexter_score(metrics):
     """
     Calculate overall fundamental thunder score (0-100)
-    Similar to Dexter's scoring but using FREE data
-
-    Scoring breakdown:
-    - Growth (30 points): Revenue + earnings growth
-    - Profitability (25 points): Margins + ROE
-    - Financial Health (25 points): Debt, liquidity
-    - Quality (20 points): Cash flow, consistency
+    
+    PHASE 1 ENHANCED SCORING:
+    - Earnings Acceleration (20 points) - NEW!
+    - Revenue Growth (15 points) - reduced from 30
+    - EPS Growth (10 points) - NEW split from revenue
+    - Profitability (25 points) - unchanged
+    - Financial Health (20 points) - reduced from 25
+    - Quality (10 points) - reduced from 20
+    
+    Total: 100 points
+    Emphasis on EARNINGS MOMENTUM over static metrics
     """
 
     if not metrics:
@@ -110,20 +172,40 @@ def calculate_dexter_score(metrics):
 
     score = 0
 
-    # 1. GROWTH SCORE (30 points)
+    # 1. EARNINGS ACCELERATION SCORE (20 points) - PHASE 1 NEW!
+    acceleration_quarters = metrics.get('earnings_acceleration_quarters', 0)
+    is_accelerating = metrics.get('is_accelerating', False)
+    
+    if acceleration_quarters >= 2:
+        score += 20  # 2+ consecutive quarters of acceleration
+    elif acceleration_quarters == 1:
+        score += 10  # 1 quarter of acceleration
+    
+    # 2. REVENUE GROWTH SCORE (15 points)
     revenue_growth = metrics.get('revenue_growth_yoy', 0) or 0
-    if revenue_growth > 20:
-        score += 30
-    elif revenue_growth > 15:
-        score += 25
-    elif revenue_growth > 10:
-        score += 20
-    elif revenue_growth > 5:
+    if revenue_growth > 25:
         score += 15
-    elif revenue_growth > 0:
+    elif revenue_growth > 20:
+        score += 12
+    elif revenue_growth > 15:
         score += 10
+    elif revenue_growth > 10:
+        score += 7
+    elif revenue_growth > 5:
+        score += 5
 
-    # 2. PROFITABILITY SCORE (25 points)
+    # 3. EPS GROWTH SCORE (10 points) - PHASE 1 NEW!
+    earnings_growth = metrics.get('earnings_growth_yoy', 0) or 0
+    if earnings_growth > 30:
+        score += 10
+    elif earnings_growth > 25:
+        score += 8
+    elif earnings_growth > 20:
+        score += 6
+    elif earnings_growth > 15:
+        score += 4
+
+    # 4. PROFITABILITY SCORE (25 points)
     operating_margin = metrics.get('operating_margin', 0) or 0
     roe = metrics.get('roe', 0) or 0
 
@@ -139,41 +221,41 @@ def calculate_dexter_score(metrics):
     if roe > 20:
         score += 10
     elif roe > 15:
-        score += 8
+        score += 7
     elif roe > 10:
-        score += 6
+        score += 5
 
-    # 3. FINANCIAL HEALTH SCORE (25 points)
+    # 5. FINANCIAL HEALTH SCORE (20 points)
     debt_to_equity = metrics.get('debt_to_equity', 999) or 999
     current_ratio = metrics.get('current_ratio', 0) or 0
 
     # Lower debt is better
     if debt_to_equity < 0.3:
-        score += 15
-    elif debt_to_equity < 0.5:
         score += 12
+    elif debt_to_equity < 0.5:
+        score += 10
     elif debt_to_equity < 1.0:
-        score += 9
+        score += 7
     elif debt_to_equity < 2.0:
-        score += 5
+        score += 4
 
     # Liquidity
     if current_ratio > 2.0:
-        score += 10
-    elif current_ratio > 1.5:
         score += 8
-    elif current_ratio > 1.0:
+    elif current_ratio > 1.5:
         score += 6
+    elif current_ratio > 1.0:
+        score += 4
 
-    # 4. THUNDER SCORE (20 points)
+    # 6. QUALITY SCORE (10 points)
     fcf = metrics.get('free_cash_flow', 0) or 0
     revenue_trend = metrics.get('revenue_trend', 'UNKNOWN')
 
     if fcf > 0:
-        score += 10
+        score += 5
 
     if revenue_trend == 'GROWING':
-        score += 10
+        score += 5
 
     return min(score, 100)  # Cap at 100
 
@@ -206,6 +288,10 @@ def analyze_with_ai(ticker, metrics, earnings_in_days):
         except:
             return default
 
+    # PHASE 1: Include earnings acceleration in AI context
+    acceleration_status = "✅ ACCELERATING" if metrics.get('is_accelerating') else "❌ NOT ACCELERATING"
+    acceleration_quarters = metrics.get('earnings_acceleration_quarters', 0)
+
     context = f"""You are a fundamental analyst evaluating a stock for a 30-60 day thunder-based trade.
 
 COMPANY: {metrics.get('company_name', ticker)} ({ticker})
@@ -213,6 +299,8 @@ SECTOR: {metrics.get('sector', 'Unknown')}
 
 FUNDAMENTAL METRICS:
 - Revenue Growth YoY: {safe_format(metrics.get('revenue_growth_yoy'), '.1f', 'N/A')}%
+- EPS Growth YoY: {safe_format(metrics.get('earnings_growth_yoy'), '.1f', 'N/A')}%
+- Earnings Acceleration: {acceleration_status} ({acceleration_quarters} quarters)
 - Operating Margin: {safe_format(metrics.get('operating_margin'), '.1f', 'N/A')}%
 - Net Margin: {safe_format(metrics.get('net_margin'), '.1f', 'N/A')}%
 - ROE: {safe_format(metrics.get('roe'), '.1f', 'N/A')}%
@@ -230,6 +318,7 @@ TASK:
 
 IMPORTANT:
 - Focus on business thunder (margins, debt, cash flow)
+- EARNINGS ACCELERATION is critical - accelerating growth = higher probability of beat
 - Consider earnings catalyst (will fundamentals translate to earnings beat?)
 - We plan to HOLD THROUGH EARNINGS (not a quick flip)
 
@@ -355,7 +444,7 @@ def analyze_thunder_candidate(ticker, earnings_date):
     """
 
     print("=" * 70)
-    print(f"🔍 DEXTER-LITE ANALYSIS: {ticker}")
+    print(f"🔍 DEXTER-LITE ANALYSIS v2: {ticker}")
     print("=" * 70)
 
     # Calculate days to earnings
@@ -378,8 +467,14 @@ def analyze_thunder_candidate(ticker, earnings_date):
     # Step 2: Calculate Dexter score
     dexter_score = calculate_dexter_score(metrics)
     print(f"\n🎯 Dexter Quality Score: {dexter_score}/100")
+    
+    # PHASE 1: Show earnings acceleration
+    if metrics.get('is_accelerating'):
+        print(f"   ✅ Earnings ACCELERATING ({metrics.get('earnings_acceleration_quarters')} quarters)")
+    else:
+        print(f"   ⚠️ Earnings NOT accelerating")
 
-    # Step 3: AI analysis (costs ~$0.01)
+    # Step 3: AI analysis (costs ~/bin/zsh.01)
     print(f"\n🤖 Running AI analysis...")
     ai_analysis = analyze_with_ai(ticker, metrics, days_to_earnings)
 
@@ -393,6 +488,9 @@ def analyze_thunder_candidate(ticker, earnings_date):
 
         # Metrics
         'revenue_growth_yoy': metrics.get('revenue_growth_yoy'),
+        'earnings_growth_yoy': metrics.get('earnings_growth_yoy'),
+        'earnings_acceleration_quarters': metrics.get('earnings_acceleration_quarters'),
+        'is_accelerating': metrics.get('is_accelerating'),
         'operating_margin': metrics.get('operating_margin'),
         'debt_to_equity': metrics.get('debt_to_equity'),
         'roe': metrics.get('roe'),
@@ -434,7 +532,7 @@ def analyze_thunder_candidate(ticker, earnings_date):
     print("\n" + "=" * 70)
 
     # Save to cache
-    save_to_cache(full_analysis)
+    # save_to_cache(full_analysis)  # TODO: Update to use thunder_evaluations
 
     return full_analysis
 
@@ -508,3 +606,4 @@ if __name__ == "__main__":
         print(f"\n✅ Analysis complete for {test_ticker}")
         print(f"   Dexter Score: {result['dexter_score']}/100")
         print(f"   Recommendation: {result['recommendation']}")
+        print(f"   Earnings Acceleration: {result['is_accelerating']}")

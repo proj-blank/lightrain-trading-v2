@@ -31,6 +31,9 @@ except ImportError:
 # Import GlobalMarketFilter for /gc command
 from global_market_filter import GlobalMarketFilter
 
+# US Telegram handlers
+from scripts.us_telegram_handlers import handle_us_positions, handle_us_daily, handle_us_pnl, handle_us_capital, handle_us_status
+
 # Import Angel One SmartAPI for real-time index data
 try:
     from SmartApi import SmartConnect
@@ -52,6 +55,25 @@ ANGEL_TOTP_SECRET = os.getenv('ANGELONE_TOTP_SECRET')
 # Global Angel One session (lazy initialization with auto-refresh)
 _angel_session = None
 _angel_session_time = None
+
+def calculate_trading_days_held(entry_date, current_date=None):
+    """Calculate trading days (business days) held"""
+    import pandas as pd
+    from datetime import datetime, date
+    
+    if current_date is None:
+        current_date = date.today()
+    
+    entry_dt = pd.to_datetime(entry_date)
+    current_dt = pd.to_datetime(current_date)
+    
+    # Calculate business days (excluding entry day)
+    start_next = entry_dt + pd.Timedelta(days=1)
+    if current_dt >= start_next:
+        business_days = pd.bdate_range(start=start_next, end=current_dt)
+        return len(business_days)
+    return 0
+
 
 def get_angel_session(force_refresh=False):
     """
@@ -152,20 +174,36 @@ def get_updates(offset=None):
 def handle_help():
     return """<b>🤖 LightRain Bot Commands</b>
 
-<b>Portfolio & Status:</b>
+<b>General:</b>
 /help - Show this help
-/status - System status
+/status - System status (both markets)
+
+<b>🇮🇳 India Market:</b>
 /positions - Active positions (with P&L)
 /pnl - Portfolio P&L summary
 /gc - Global market check (regime + live data)
+/igc - Intraday regime check
+/run-daily - Run daily trading script
 /daily - DAILY strategy positions
 /swing - SWING strategy positions
 /cap - Capital tracker
+
+<b>🇺🇸 US Market:</b>
+/us-positions - Active US positions (with P&L)
+/us-pnl - US portfolio P&L
+/us-daily - DAILY-US positions
+/us-swing - SWING-US positions
+/us-thunder - THUNDER-US positions
+/us-cap - US capital tracker
+/us-gc - US market check
 
 <b>Circuit Breaker Control:</b>
 /hold TICKER - Continue holding despite alert
 /exit TICKER - Force exit position now
 /exitall - 🚨 KILL SWITCH: Exit ALL & halt trading today
+/exit-daily - Exit all DAILY positions
+/exit-swing - Exit all SWING positions
+/exit-thunder - Exit all THUNDER positions
 /smart-stop TICKER - Use smart stops (ATR/Chandelier)
 """
 
@@ -187,7 +225,7 @@ Status: ✅ Running
 
 def handle_positions(strategy=None):
     try:
-        strategies = [strategy] if strategy else ['DAILY', 'SWING']
+        strategies = [strategy] if strategy else ['DAILY', 'SWING', 'THUNDER']
         result = "<b>📈 Active Positions</b>\n\n"
 
         for strat in strategies:
@@ -230,92 +268,179 @@ def handle_positions(strategy=None):
     except Exception as e:
         return f"❌ Error: {e}"
 
+def handle_us_gc():
+    """US Good-to-Clear - Check US market conditions with regime analysis"""
+    try:
+        import pytz
+        from datetime import datetime
+        import sys
+        sys.path.insert(0, '/home/ubuntu/trading-us')
+        from global_market_filter_us import USMarketFilter
+        
+        result = "<b>🇺🇸 US MARKET CHECK (LIVE)</b>\n"
+        
+        # Current time in EST
+        est = pytz.timezone('US/Eastern')
+        now = datetime.now(est)
+        result += f"⏰ {now.strftime('%H:%M:%S EST')}\n\n"
+        
+        # Market hours check
+        is_weekend = now.weekday() >= 5
+        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        
+        if is_weekend:
+            result += "🔴 <b>Market Status:</b> CLOSED (Weekend)\n\n"
+        elif market_open <= now < market_close:
+            result += "🟢 <b>Market Status:</b> OPEN (Regular Hours)\n\n"
+        else:
+            if now < market_open:
+                result += "🟡 <b>Market Status:</b> Pre-Market\n\n"
+            else:
+                result += "🟡 <b>Market Status:</b> After-Hours\n\n"
+        
+        # Fetch US regime analysis
+        filter_system = USMarketFilter()
+        filter_system.fetch_sp_futures()
+        filter_system.fetch_nasdaq_futures()
+        filter_system.fetch_vix()
+        filter_system.fetch_gold()
+        
+        analysis = filter_system.analyze_regime()
+        
+        # Display live market data
+        result += "<b>━━━ LIVE US MARKETS ━━━</b>\n"
+        
+        # S&P Futures
+        if 'sp_futures' in filter_system.indicators:
+            sp = filter_system.indicators['sp_futures']
+            sp_emoji = "🟢" if sp['change_pct'] >= 0 else "🔴"
+            result += f"{sp_emoji} S&P Futures: {sp['change_pct']:+.2f}%\n"
+        
+        # Nasdaq Futures
+        if 'nasdaq_futures' in filter_system.indicators:
+            nq = filter_system.indicators['nasdaq_futures']
+            nq_emoji = "🟢" if nq['change_pct'] >= 0 else "🔴"
+            result += f"{nq_emoji} Nasdaq Futures: {nq['change_pct']:+.2f}%\n"
+        
+        # VIX
+        if 'vix' in filter_system.indicators:
+            vix = filter_system.indicators['vix']
+            vix_emoji = "🟢" if vix['value'] < 20 else "🟡" if vix['value'] < 30 else "🔴"
+            result += f"{vix_emoji} VIX: {vix['value']:.1f} ({vix['level']})\n"
+        
+        # Gold
+        if 'gold' in filter_system.indicators:
+            gold = filter_system.indicators['gold']
+            gold_emoji = "🟢" if gold['change_pct'] < 0 else "🔴" if gold['change_pct'] > 1 else "⚪"
+            result += f"{gold_emoji} Gold: {gold['change_pct']:+.2f}% (inverse)\n"
+        
+        # Regime Analysis
+        regime_emoji = "🟢" if analysis['regime'] == "BULL" else "🟡" if analysis['regime'] in ["NEUTRAL", "CAUTION"] else "🔴"
+        sizing_pct = f"{int(analysis['position_sizing_multiplier'] * 100)}%"
+        if not analysis['allow_new_entries']:
+            sizing_pct += " (HALT)"
+        
+        result += f"\n<b>━━━ REGIME ANALYSIS ━━━</b>\n"
+        result += f"<b>Total Score:</b> {analysis['score']:.1f}\n"
+        result += f"<b>Current Regime:</b> {regime_emoji} {analysis['regime']}\n"
+        result += f"<b>Position Sizing:</b> {sizing_pct}\n\n"
+        
+        # Show detailed signals
+        result += "<b>Signals:</b>\n"
+        for signal in analysis['signals']:
+            result += f"  {signal}\n"
+        
+        result += "\n<b>━━━ US STRATEGY STATUS ━━━</b>\n"
+        result += "🟢 DAILY: Ready (,000)\n"
+        result += "🟢 SWING: Ready (,000)\n"
+        result += "🟢 THUNDER: Ready (,000)\n"
+        
+        return result
+        
+    except Exception as e:
+        import traceback
+        return f"❌ Error: {e}\n{traceback.format_exc()[:200]}"
+
+
 def handle_capital():
     try:
-        from scripts.db_connection import get_db_cursor
-        
-        result = "<b>💰 Capital Tracker</b>\n\n"
-        
+        from scripts.db_connection import get_db_cursor, get_available_cash
+
+        result = "<b>💰 Capital Tracker (PAPER Mode)</b>\n\n"
+
         INITIAL_CAPITAL = 500000
-        
+        TRADING_MODE = 'PAPER'
+
         for strategy in ["DAILY", "SWING", "THUNDER"]:
             with get_db_cursor() as cur:
-                # Get P&L from positions table
+                # Get stats from positions table only (single source of truth)
                 cur.execute("""
-                    SELECT 
-                        COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END), 0) as profits_pos,
-                        COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END), 0) as losses_pos,
+                    SELECT
+                        COALESCE(SUM(CASE WHEN status = 'CLOSED' AND realized_pnl > 0 THEN realized_pnl ELSE 0 END), 0) as profits,
+                        COALESCE(SUM(CASE WHEN status = 'CLOSED' AND realized_pnl < 0 THEN realized_pnl ELSE 0 END), 0) as realized_losses,
                         COALESCE(SUM(CASE WHEN status = 'HOLD' THEN entry_price * quantity ELSE 0 END), 0) as deployed,
-                        COALESCE(SUM(CASE WHEN status = 'HOLD' THEN unrealized_pnl ELSE 0 END), 0) as unrealized_pnl
-                    FROM positions 
-                    WHERE strategy = %s
-                """, (strategy,))
-                pos_row = cur.fetchone()
-                
-                # Get P&L from trades table (only for DAILY/SWING)
-                if strategy in ['DAILY', 'SWING']:
-                    cur.execute("""
-                        SELECT 
-                            COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) as profits_trades,
-                            COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END), 0) as losses_trades
-                        FROM trades
-                        WHERE strategy = %s
-                    """, (strategy,))
-                    trade_row = cur.fetchone()
-                    profits_trades = float(trade_row['profits_trades'])
-                    losses_trades = float(trade_row['losses_trades'])
-                else:
-                    profits_trades = 0
-                    losses_trades = 0
-                
-                # Calculate totals
-                profits = float(pos_row['profits_pos']) + profits_trades
-                losses = float(pos_row['losses_pos']) + losses_trades
-                deployed = float(pos_row['deployed'])
-                unrealized_pnl = float(pos_row['unrealized_pnl'])
-                
-                total_capital = INITIAL_CAPITAL - losses
-                available = total_capital - deployed
-                net_pnl = profits - losses
-                
+                        COALESCE(SUM(CASE WHEN status = 'HOLD' THEN unrealized_pnl ELSE 0 END), 0) as unrealized_pnl,
+                        COALESCE(SUM(CASE WHEN status = 'HOLD' AND unrealized_pnl < 0 THEN unrealized_pnl ELSE 0 END), 0) as unrealized_losses
+                    FROM positions
+                    WHERE strategy = %s AND trading_mode = %s
+                """, (strategy, TRADING_MODE))
+                row = cur.fetchone()
+
+                profits = float(row['profits'])
+                realized_losses = float(row['realized_losses'])  # negative value
+                deployed = float(row['deployed'])
+                unrealized_pnl = float(row['unrealized_pnl'])
+                unrealized_losses = float(row['unrealized_losses'])  # negative value
+
+                # Use get_available_cash for accurate calculation
+                available = get_available_cash(strategy, TRADING_MODE)
+
+                # Total losses (realized + unrealized, both negative)
+                total_losses = realized_losses + unrealized_losses
+                net_pnl = profits + realized_losses  # realized_losses is negative
+
                 result += f"<b>{strategy}</b>\n"
-                result += f"  Total Capital: ₹{total_capital:,.0f}\n"
+                result += f"  Initial Capital: ₹{INITIAL_CAPITAL:,.0f}\n"
                 result += f"  Deployed: ₹{deployed:,.0f}\n"
                 result += f"  Available: ₹{available:,.0f}\n"
                 result += f"  Unrealized P&L: ₹{unrealized_pnl:,.0f}\n"
                 result += f"  Locked Profits: ₹{profits:,.0f}\n"
-                result += f"  Losses: ₹{losses:,.0f}\n"
-                result += f"  Net P&L: ₹{net_pnl:,.0f}\n\n"
-        
+                result += f"  Realized Losses: ₹{abs(realized_losses):,.0f}\n"
+                result += f"  Unrealized Losses: ₹{abs(unrealized_losses):,.0f}\n"
+                result += f"  Net Realized P&L: ₹{net_pnl:,.0f}\n\n"
+
         # Add consolidated summary
         with get_db_cursor() as cur:
-            # Get totals from positions
+            # Get totals from positions only (single source of truth)
             cur.execute("""
-                SELECT 
-                    COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END), 0) as total_profits_pos,
-                    COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END), 0) as total_losses_pos,
+                SELECT
+                    COALESCE(SUM(CASE WHEN status = 'CLOSED' AND realized_pnl > 0 THEN realized_pnl ELSE 0 END), 0) as total_profits,
+                    COALESCE(SUM(CASE WHEN status = 'CLOSED' AND realized_pnl < 0 THEN realized_pnl ELSE 0 END), 0) as total_realized_losses,
                     COALESCE(SUM(CASE WHEN status = 'HOLD' THEN entry_price * quantity ELSE 0 END), 0) as total_deployed,
-                    COALESCE(SUM(CASE WHEN status = 'HOLD' THEN unrealized_pnl ELSE 0 END), 0) as total_unrealized
+                    COALESCE(SUM(CASE WHEN status = 'HOLD' THEN unrealized_pnl ELSE 0 END), 0) as total_unrealized,
+                    COALESCE(SUM(CASE WHEN status = 'HOLD' AND unrealized_pnl < 0 THEN unrealized_pnl ELSE 0 END), 0) as total_unrealized_losses
                 FROM positions
-            """)
-            pos_totals = cur.fetchone()
-            
-            # Get totals from trades
-            cur.execute("""
-                SELECT 
-                    COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) as total_profits_trades,
-                    COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END), 0) as total_losses_trades
-                FROM trades
-            """)
-            trade_totals = cur.fetchone()
-        
-        grand_profits = float(pos_totals['total_profits_pos']) + float(trade_totals['total_profits_trades'])
-        grand_losses = float(pos_totals['total_losses_pos']) + float(trade_totals['total_losses_trades'])
-        grand_net = grand_profits - grand_losses
-        grand_deployed = float(pos_totals['total_deployed'])
-        grand_unrealized = float(pos_totals['total_unrealized'])
-        grand_available = (1500000 - grand_losses - grand_deployed)
-        
+                WHERE trading_mode = %s
+            """, (TRADING_MODE,))
+            totals = cur.fetchone()
+
+        grand_profits = float(totals['total_profits'])
+        grand_realized_losses = float(totals['total_realized_losses'])  # negative
+        grand_deployed = float(totals['total_deployed'])
+        grand_unrealized = float(totals['total_unrealized'])
+        grand_unrealized_losses = float(totals['total_unrealized_losses'])  # negative
+
+        # Calculate grand available using get_available_cash for all strategies
+        grand_available = sum([
+            get_available_cash("DAILY", TRADING_MODE),
+            get_available_cash("SWING", TRADING_MODE),
+            get_available_cash("THUNDER", TRADING_MODE)
+        ])
+
+        grand_net = grand_profits + grand_realized_losses  # realized_losses is negative
+        grand_total_losses = grand_realized_losses + grand_unrealized_losses
+
         result += "<b>═══════════════════════</b>\n"
         result += "<b>📊 CONSOLIDATED TOTALS</b>\n"
         result += "<b>═══════════════════════</b>\n"
@@ -324,9 +449,9 @@ def handle_capital():
         result += f"  Available: ₹{grand_available:,.0f}\n"
         result += f"  Unrealized P&L: ₹{grand_unrealized:,.0f}\n"
         result += f"  Total Profits: ₹{grand_profits:,.0f}\n"
-        result += f"  Total Losses: ₹{grand_losses:,.0f}\n"
-        result += f"  <b>Net P&L: ₹{grand_net:,.0f}</b>\n"
-        
+        result += f"  Total Losses: ₹{abs(grand_total_losses):,.0f}\n"
+        result += f"  <b>Net Realized P&L: ₹{grand_net:,.0f}</b>\n"
+
         return result
     except Exception as e:
         import traceback
@@ -348,7 +473,6 @@ def handle_pnl():
             with get_db_cursor() as cur:
                 cur.execute("""
                     SELECT ticker, entry_price, quantity, category, entry_date,
-                           CURRENT_DATE - entry_date as days_held,
                            unrealized_pnl
                     FROM positions 
                     WHERE strategy = %s AND status = 'HOLD'
@@ -364,7 +488,7 @@ def handle_pnl():
                 entry_price = float(p['entry_price'])
                 qty = int(p['quantity'])
                 category = p['category'] or 'Unknown'
-                days_held = int(p['days_held']) if p['days_held'] is not None else 0
+                days_held = calculate_trading_days_held(p['entry_date'])
 
                 # Fetch current price
                 current_price = entry_price
@@ -491,14 +615,14 @@ def handle_gc():
         result = "<b>🌍 GLOBAL CHECK (LIVE)</b>\n"
         result += f"⏰ {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S IST')}\n\n"
 
-        # Read morning regime (8:30 AM baseline)
-        regime_file = '/home/ubuntu/trading/data/market_regime.json'
+        # Read morning regime from database (migrated from JSON Dec 30, 2025)
+        from global_market_filter import get_current_regime
+        
         morning_regime = "UNKNOWN"
         morning_score = 0
-
-        if os.path.exists(regime_file):
-            with open(regime_file, 'r') as f:
-                regime_data = json.load(f)
+        regime_data = get_current_regime()
+        
+        if regime_data:
             morning_regime = regime_data.get('regime', 'UNKNOWN')
             morning_score = regime_data.get('score', 0)
 
@@ -605,6 +729,46 @@ def handle_gc():
     except Exception as e:
         import traceback
         return f"❌ Error: {str(e)}\n{traceback.format_exc()[:300]}"
+
+def handle_igc():
+    """Intraday Check - Run intraday_regime_check.py"""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['python3', '/home/ubuntu/trading/intraday_regime_check.py'],
+            cwd='/home/ubuntu/trading',
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        lines = result.stdout.split('\n')
+        msg = '<b>📊 INTRADAY REGIME CHECK</b>\n\n'
+        
+        for i, line in enumerate(lines):
+            if 'Morning Regime' in line:
+                relevant = lines[i:i+18]
+                msg += '\n'.join(relevant)
+                break
+        
+        return msg
+    except Exception as e:
+        return f'❌ Error: {str(e)}'
+
+def handle_run_daily():
+    """Run Daily - Execute daily_trading_pg.py"""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['python3', '/home/ubuntu/trading/daily_trading_pg.py'],
+            cwd='/home/ubuntu/trading',
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        lines = result.stdout.split('\n'); msg = '<b>🤖 DAILY TRADING</b>\n\n' + '\n'.join([l for l in lines if l.strip()][:30]); return msg
+    except Exception as e:
+        return f'❌ Error: {str(e)}'
 
 def handle_hold(ticker):
     """Mark position to hold (suppress alerts, wait for hard stop)"""
@@ -788,6 +952,80 @@ def handle_exitall():
         import traceback
         return f"❌ Kill switch error: {str(e)}\n{traceback.format_exc()[:200]}"
 
+
+def handle_exit_strategy(strategy):
+    """Exit all positions for a specific strategy (DAILY, SWING, or THUNDER)"""
+    try:
+        result = f"<b>🔴 EXIT ALL {strategy} POSITIONS</b>\n\n"
+
+        # Get active positions for this strategy
+        positions = get_active_positions(strategy)
+
+        if not positions:
+            result += f"ℹ️ No active {strategy} positions to exit.\n"
+            return result
+
+        result += f"<b>Exiting {len(positions)} {strategy} positions...</b>\n\n"
+
+        total_pnl = 0
+        exit_count = 0
+
+        for position in positions:
+            ticker = position["ticker"]
+            entry_price = float(position["entry_price"])
+            qty = int(position["quantity"])
+
+            try:
+                # Get current price
+                current_price = entry_price
+                if YFINANCE_AVAILABLE:
+                    try:
+                        stock = yf.Ticker(ticker)
+                        hist = stock.history(period="1d")
+                        if not hist.empty:
+                            current_price = float(hist["Close"].iloc[-1])
+                    except:
+                        pass
+
+                # Calculate P&L
+                pnl = (current_price - entry_price) * qty
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                total_pnl += pnl
+
+                # Close position
+                close_position(ticker, strategy, current_price, pnl)
+                update_capital(strategy, pnl)
+
+                # Log trade
+                log_trade(
+                    ticker=ticker,
+                    strategy=strategy,
+                    signal="SELL",
+                    price=current_price,
+                    quantity=qty,
+                    pnl=pnl,
+                    notes=f"EXIT-{strategy} via Telegram"
+                )
+
+                # Add to result
+                pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                result += f"{pnl_emoji} {ticker}: ₹{pnl:,.0f} ({pnl_pct:+.2f}%)\n"
+                exit_count += 1
+
+            except Exception as e:
+                result += f"⚠️ {ticker}: Failed - {str(e)[:50]}\n"
+
+        pnl_emoji = "🟢" if total_pnl > 0 else "🔴" if total_pnl < 0 else "⚪"
+        result += f"\n<b>Total P&L:</b> {pnl_emoji} ₹{total_pnl:,.0f}\n"
+        result += f"<b>Exited:</b> {exit_count}/{len(positions)} positions\n"
+
+        return result
+
+    except Exception as e:
+        import traceback
+        return f"❌ Exit {strategy} error: {str(e)}\n{traceback.format_exc()[:200]}"
+
+
 def handle_smart_stop(ticker):
     """Enable smart-stop mode (use ATR/Chandelier stops instead of circuit breaker)"""
     try:
@@ -832,6 +1070,10 @@ def process_command(text):
         return handle_pnl()
     elif cmd == '/gc':
         return handle_gc()
+    elif cmd == "/igc":
+        return handle_igc()
+    elif cmd == "/run-daily":
+        return handle_run_daily()
     elif cmd == '/daily':
         return handle_positions('DAILY')
     elif cmd == '/swing':
@@ -839,9 +1081,43 @@ def process_command(text):
     elif cmd == '/cap':
         return handle_capital()
 
+    # US Market Commands
+    elif cmd == '/us-positions' or cmd == '/us-pos':
+        return handle_us_positions()
+    elif cmd == "/us-pnl":
+        return handle_us_pnl()
+    elif cmd == "/us-daily":
+        return handle_us_daily()
+    elif cmd == '/us-pnl':
+        return handle_us_positions()
+    elif cmd == "/us-pnl":
+        return handle_us_pnl()
+    elif cmd == "/us-daily":
+        return handle_us_daily()
+    elif cmd == '/us-daily':
+        return "🇺🇸 DAILY-US: 0 positions"
+    elif cmd == '/us-swing':
+        return "🇺🇸 SWING-US: 0 positions"
+    elif cmd == '/us-cap':
+        return handle_us_capital()
+    elif cmd == '/us-status':
+        return handle_us_status()
+    elif cmd == '/us-gc':
+        return handle_us_gc()
+    elif cmd == '/us-thunder':
+        return "🇺🇸 THUNDER-US: 0 positions"
+
     # KILL SWITCH - Exit all positions and halt trading
     elif cmd == '/exitall':
         return handle_exitall()
+
+    # Exit all positions for specific strategy
+    elif cmd == "/exit-daily":
+        return handle_exit_strategy("DAILY")
+    elif cmd == "/exit-swing":
+        return handle_exit_strategy("SWING")
+    elif cmd == "/exit-thunder":
+        return handle_exit_strategy("THUNDER")
 
     # Commands with ticker argument
     elif cmd == '/hold' and len(parts) == 2:

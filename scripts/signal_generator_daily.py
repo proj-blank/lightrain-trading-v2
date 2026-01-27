@@ -65,9 +65,36 @@ def check_knife_guards(df):
         if current_price <= sma_50:
             return False, f'Below 50 SMA (Price: {current_price:.2f} vs SMA: {sma_50:.2f})', guard_details
         
-        # Guard 2: Volume must be above 20-day average
-        if current_volume < volume_sma_20:
-            return False, f'Weak Volume ({current_volume:,} < {volume_sma_20:,.0f})', guard_details
+        # Guard 2: Volume must be above time-adjusted 20-day average
+        # During market hours, adjust expected volume based on time elapsed
+        # Market hours: 9:15 AM to 3:30 PM (375 minutes)
+        from datetime import datetime
+        import pytz
+        
+        ist = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(ist)
+        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        
+        # Calculate time-based volume adjustment factor
+        if now < market_open:
+            volume_factor = 0.1  # Pre-market, expect minimal volume
+        elif now > market_close:
+            volume_factor = 1.0  # After market, compare full day
+        else:
+            # During market hours - calculate fraction of day elapsed
+            minutes_elapsed = (now - market_open).total_seconds() / 60
+            total_minutes = 375  # 9:15 to 3:30
+            volume_factor = max(0.1, minutes_elapsed / total_minutes)
+        
+        # Adjusted volume threshold
+        adjusted_volume_threshold = volume_sma_20 * volume_factor
+        
+        guard_details['volume_factor'] = round(volume_factor, 2)
+        guard_details['adjusted_threshold'] = int(adjusted_volume_threshold)
+        
+        if current_volume < adjusted_volume_threshold:
+            return False, f'Weak Volume ({current_volume:,} < {adjusted_volume_threshold:,.0f} [{volume_factor:.0%} of avg])', guard_details
         
         # All guards passed
         return True, 'PASS - All guards cleared', guard_details
