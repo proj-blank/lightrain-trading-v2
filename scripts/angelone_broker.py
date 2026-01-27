@@ -164,14 +164,25 @@ class AngelOneBroker:
                 order_params['price'] = str(price)
 
             response = self.smartApi.placeOrder(order_params)
-
-            if response['status']:
-                order_id = response['data']['orderid']
+            
+            # Response can be string (order_id) or dict
+            if isinstance(response, str):
+                # Direct order ID returned
+                order_id = response
                 print(f"✅ Order placed: {transaction_type} {quantity} {symbol} @ {price if price else 'MARKET'}")
                 print(f"   Order ID: {order_id}")
                 return order_id
+            elif isinstance(response, dict):
+                if response.get('status'):
+                    order_id = response.get('data', {}).get('orderid') or response.get('orderid')
+                    print(f"✅ Order placed: {transaction_type} {quantity} {symbol} @ {price if price else 'MARKET'}")
+                    print(f"   Order ID: {order_id}")
+                    return order_id
+                else:
+                    print(f"❌ Order failed: {response.get('message', 'Unknown error')}")
+                    return None
             else:
-                print(f"❌ Order failed: {response.get('message', 'Unknown error')}")
+                print(f"❌ Unexpected response type: {type(response)}")
                 return None
 
         except Exception as e:

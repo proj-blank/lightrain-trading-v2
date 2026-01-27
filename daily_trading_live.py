@@ -133,6 +133,16 @@ print("=" * 70)
 print(f"📅 {datetime.now().strftime('%d %b %Y, %H:%M:%S')}")
 print("=" * 70)
 
+# Initialize AngelOne broker for LIVE order execution
+print("🔐 Initializing AngelOne broker...")
+broker = AngelOneBroker()
+if not broker.login():
+    error_msg = "🔴 LIVE: ❌ Failed to login to AngelOne. Cannot proceed."
+    print(error_msg)
+    send_telegram_message(error_msg)
+    sys.exit(1)
+print("✅ Broker connected")
+
 # MARKET HOURS AND HOLIDAY CHECK
 def is_market_open():
     """Check if Indian stock market (NSE) is currently open"""
@@ -391,9 +401,72 @@ if action_915 == "SKIP":
 else:
     print(f"✅ Nifty regime: {regime_915} (multiplier: {regime_multiplier_915*100:.0f}%)")
 
-# STEP 2: Check Nifty opening candle at 9:30 AM
-print("🔍 SMART ENTRY: Analyzing Nifty opening candle (9:30 AM)...")
-candle_level, slice_pct, notes_930, candle_data = analyze_nifty_strength_930()
+# STEP 2: Check market conditions (9:30 candle OR mid-day IGC)
+current_hour = datetime.now().hour
+current_minute = datetime.now().minute
+
+# Mid-day mode: After 10:00 AM, use IGC (Intraday Global Check) instead of 9:30 candle
+if current_hour >= 10:
+    print(f"🕙 MID-DAY MODE: Running at {current_hour}:{current_minute:02d} - using IGC check")
+    
+    # Run quick IGC check
+    from scripts.angelone_price_fetcher import get_angel_session
+    igc_session = get_angel_session()
+    
+    green_count = 0
+    total_count = 0
+    
+    if igc_session:
+        indices = [
+            ('NIFTY 50', '99926000'),
+            ('Nifty Midcap 150', '99926009'),
+            ('Nifty Smallcap 250', '99926013')
+        ]
+        
+        print("   Checking live indices:")
+        for idx_name, token in indices:
+            try:
+                ltp_data = igc_session.ltpData('NSE', idx_name, token)
+                if ltp_data and ltp_data.get('status'):
+                    data = ltp_data['data']
+                    ltp = float(data.get('ltp', 0))
+                    open_price = float(data.get('open', 0))
+                    if open_price > 0:
+                        change_pct = ((ltp - open_price) / open_price) * 100
+                        is_green = change_pct >= 0
+                        emoji = '🟢' if is_green else '🔴'
+                        print(f"     {emoji} {idx_name}: {change_pct:+.2f}%")
+                        total_count += 1
+                        if is_green:
+                            green_count += 1
+            except Exception as e:
+                print(f"     ⚠️ {idx_name}: {e}")
+        
+        breadth_pct = (green_count / total_count * 100) if total_count > 0 else 50
+        print(f"   Breadth: {green_count}/{total_count} GREEN ({breadth_pct:.0f}%)")
+        
+        # Convert breadth to deployment
+        if breadth_pct >= 67:
+            slice_pct = 0.75
+            candle_level = 'STRONG'
+            notes_930 = f'IGC: {breadth_pct:.0f}% bullish - Deploy 75%'
+        elif breadth_pct >= 33:
+            slice_pct = 0.50
+            candle_level = 'NEUTRAL'
+            notes_930 = f'IGC: {breadth_pct:.0f}% mixed - Deploy 50%'
+        else:
+            slice_pct = 0.0
+            candle_level = 'VERY_WEAK'
+            notes_930 = f'IGC: {breadth_pct:.0f}% bearish - Skip'
+    else:
+        slice_pct = 0.50
+        candle_level = 'NEUTRAL'
+        notes_930 = 'IGC unavailable - Default 50%'
+    
+    candle_data = {'pattern': 'IGC_MIDDAY', 'strength': slice_pct, 'sentiment': candle_level}
+else:
+    print("🔍 SMART ENTRY: Analyzing Nifty opening candle (9:30 AM)...")
+    candle_level, slice_pct, notes_930, candle_data = analyze_nifty_strength_930()
 
 # Debug logging to see actual values
 print(f"🔍 DEBUG - Candle Analysis:")
