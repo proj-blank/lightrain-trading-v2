@@ -158,26 +158,44 @@ def get_angelone_ltp(ticker):
         return None
 
 
-def get_live_price(ticker, df_close_price):
+def get_live_price(ticker, df_close_price, max_deviation_pct=3.0):
     """
-    Get live price with fallback to Yahoo
+    Get live price with validation against Yahoo
 
-    Tries AngelOne first, falls back to df Close price if unavailable
+    Tries AngelOne first, validates against yfinance price.
+    If prices differ by more than max_deviation_pct, returns None to skip entry.
 
     Args:
         ticker: NSE ticker (e.g., 'RELIANCE.NS')
-        df_close_price: Fallback price from yfinance dataframe
+        df_close_price: Reference price from yfinance dataframe
+        max_deviation_pct: Maximum allowed deviation between sources (default 3%)
 
     Returns:
-        tuple: (price, source) where source is 'angelone' or 'yahoo'
+        tuple: (price, source) where source is 'angelone', 'yahoo', or None if validation fails
     """
+    yahoo_price = float(df_close_price)
+    
     # Try AngelOne first
     angel_price = get_angelone_ltp(ticker)
+    
     if angel_price is not None:
-        return (angel_price, 'angelone')
+        # Validate AngelOne price against Yahoo
+        deviation_pct = abs(angel_price - yahoo_price) / yahoo_price * 100
+        
+        if deviation_pct <= max_deviation_pct:
+            # Prices match within tolerance - use AngelOne (more accurate)
+            return (angel_price, 'angelone')
+        else:
+            # Prices differ significantly - something is wrong
+            print(f"   ⚠️ PRICE MISMATCH for {ticker}:")
+            print(f"      AngelOne: ₹{angel_price:.2f}")
+            print(f"      Yahoo: ₹{yahoo_price:.2f}")
+            print(f"      Deviation: {deviation_pct:.1f}% (max allowed: {max_deviation_pct}%)")
+            # Return None to signal validation failure
+            return (None, 'mismatch')
 
-    # Fallback to Yahoo
-    return (float(df_close_price), 'yahoo')
+    # Fallback to Yahoo only
+    return (yahoo_price, 'yahoo')
 
 
 if __name__ == "__main__":

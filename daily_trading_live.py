@@ -612,11 +612,30 @@ except Exception as e:
     print(error_msg)
     send_telegram_message(error_msg)
     sys.exit(1)
+# Download OHLCV data for all stocks using yfinance (faster, no rate limits)
+# AngelOne is only used for final LTP when placing orders
+print(f"\n📥 Downloading data for {len(stocks_to_screen)} stocks via yfinance...")
+stock_data = {}
+download_errors = 0
 
-# Download OHLCV data for all stocks using AngelOne API
-print(f"\n📥 Downloading data for {len(stocks_to_screen)} stocks via AngelOne...")
-stock_data = load_data_angelone(stocks_to_screen, period='6mo', interval='ONE_DAY')
-download_errors = len(stocks_to_screen) - len(stock_data)
+for i, ticker in enumerate(stocks_to_screen, 1):
+    if i % 50 == 0:
+        print(f"   Progress: {i}/{len(stocks_to_screen)}")
+
+    try:
+        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+
+        # Flatten MultiIndex columns if present (yfinance bug fix)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        if not df.empty and len(df) >= 60:
+            stock_data[ticker] = df
+    except Exception as e:
+        download_errors += 1
+
+print(f"✅ Downloaded {len(stock_data)} stocks ({download_errors} errors)")
+
 print(f"✅ Downloaded {len(stock_data)} stocks ({download_errors} errors)")
 
 if not stock_data:
@@ -973,6 +992,14 @@ if total_candidates > 0:
     # Get selected positions (already filtered and scored)
     selected_positions = select_positions_for_entry(allocation_plan)
 
+
+    # Apply sector rotation fallback if slots remain unfilled
+    selected_positions = apply_sector_rotation_fallback(
+        selected_positions, 
+        candidates_by_category, 
+        effective_capital, 
+        max_positions=MAX_DAILY_POSITIONS
+    )
     # Calculate total allocated capital from Phase 3
     total_allocated = sum(p.get('position_size', 0) or p.get('capital_allocated', 0) for p in selected_positions)
 
@@ -1045,6 +1072,12 @@ if total_candidates > 0:
 
         # Get live price from AngelOne (with Yahoo fallback)
         price, price_source = get_live_price(ticker, yahoo_price)
+        
+        # Skip if price validation failed (mismatch between sources)
+        if price is None:
+            print(f"   ❌ SKIPPING {ticker}: Price validation failed - sources disagree")
+            send_telegram_message(f"⚠️ <b>LIVE - PRICE MISMATCH</b> - {ticker}: AngelOne and Yahoo prices differ too much. Skipping entry.")
+            continue
         print(f"   💰 {ticker}: ₹{price:.2f} ({price_source.upper()})")
 
         # Calculate stop loss based on ATR
@@ -1135,6 +1168,21 @@ if total_candidates > 0:
             print(f"  ⚠️ AI validation failed: {ai_error}")
             # Continue with default values
 
+        # LIVE: Check funds before placing order
+        try:
+            funds = broker.get_funds()
+            available_cash = float(funds.get('availablecash', 0)) if funds else 0
+            order_value = price * qty
+            
+            if available_cash < order_value:
+                print(f"   ❌ INSUFFICIENT FUNDS: Need ₹{order_value:,.0f}, have ₹{available_cash:,.0f}")
+                send_telegram_message(f"🔴 <b>LIVE - INSUFFICIENT FUNDS</b> - {ticker}: Need ₹{order_value:,.0f}, have ₹{available_cash:,.0f}")
+                continue
+            
+            print(f"   💰 Funds OK: ₹{available_cash:,.0f} available, need ₹{order_value:,.0f}")
+        except Exception as fund_error:
+            print(f"   ⚠️ Could not verify funds: {fund_error}")
+        
         # LIVE: Place actual order via AngelOne
         try:
             print(f"   📤 Placing LIVE BUY order for {ticker}...")
@@ -1352,3 +1400,89 @@ print(f"Portfolio P&L: ₹{metrics['total_unrealized_pnl']:,.2f}")
 print(f"{'='*70}")
 print("✅ Daily trading complete!")
 print(f"{'='*70}\n")
+
+
+# ============================================================================
+# SECTOR ROTATION FALLBACK LOGIC
+# ============================================================================
+def apply_sector_rotation_fallback(selected_positions, all_candidates, effective_capital, max_positions=3):
+    """
+    If we don't have positions in all categories (Large/Mid/Micro),
+    fill remaining slots with sector-diversified picks from available categories.
+    
+    Logic:
+    1. Track which sectors we already have positions in
+    2. For each empty slot, find best candidate from a NEW sector
+    3. Prefer different sectors over same sector
+    """
+    if not selected_positions:
+        return selected_positions
+    
+    # Track sectors already selected
+    sectors_used = set()
+    for pos in selected_positions:
+        sector = get_stock_sector(pos.get('ticker', '').replace('.NS', ''))
+        if sector:
+            sectors_used.add(sector)
+    
+    print(f"\n🔄 SECTOR ROTATION CHECK:")
+    print(f"   Current positions: {len(selected_positions)}/{max_positions}")
+    print(f"   Sectors used: {', '.join(sectors_used) if sectors_used else 'None'}")
+    
+    # If we have all positions, no need for fallback
+    if len(selected_positions) >= max_positions:
+        print(f"   ✅ All {max_positions} slots filled - no rotation needed")
+        return selected_positions
+    
+    # Calculate remaining slots and capital per slot
+    slots_remaining = max_positions - len(selected_positions)
+    capital_used = sum(p.get('position_size', 0) or p.get('capital_allocated', 0) for p in selected_positions)
+    capital_remaining = effective_capital - capital_used
+    capital_per_slot = capital_remaining / slots_remaining if slots_remaining > 0 else 0
+    
+    print(f"   Slots remaining: {slots_remaining}")
+    print(f"   Capital remaining: ₹{capital_remaining:,.0f} (₹{capital_per_slot:,.0f} per slot)")
+    
+    # Flatten all candidates from all categories
+    all_flat = []
+    for category, candidates in all_candidates.items():
+        for c in candidates:
+            c['category'] = category
+            all_flat.append(c)
+    
+    # Sort by score descending
+    all_flat.sort(key=lambda x: x.get('score', 0), reverse=True)
+    
+    # Find candidates from new sectors
+    added_count = 0
+    for candidate in all_flat:
+        if added_count >= slots_remaining:
+            break
+            
+        ticker = candidate.get('ticker', '')
+        sector = get_stock_sector(ticker.replace('.NS', ''))
+        
+        # Skip if already selected or same sector
+        if any(p.get('ticker') == ticker for p in selected_positions):
+            continue
+        if sector and sector in sectors_used:
+            continue
+        
+        # Add this candidate
+        candidate['position_size'] = capital_per_slot
+        candidate['capital_allocated'] = capital_per_slot
+        candidate['rotation_fill'] = True  # Mark as rotation fill
+        selected_positions.append(candidate)
+        
+        if sector:
+            sectors_used.add(sector)
+        
+        print(f"   ➕ Added {ticker} ({sector or 'Unknown'}) - Score: {candidate.get('score', 0):.1f}")
+        added_count += 1
+    
+    if added_count > 0:
+        print(f"   ✅ Added {added_count} positions via sector rotation")
+    else:
+        print(f"   ⚠️ No additional candidates found for rotation")
+    
+    return selected_positions
